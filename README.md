@@ -116,10 +116,32 @@ Every command that can change the machine supports a dry run:
 Every destructive workflow follows the same boundary:
 
 1. Scan without modifying the system.
-2. Report exact groups or project artifacts.
+2. Report exact groups, applications, or project artifacts.
 3. Require an explicit interactive selection or `--yes`.
 4. Validate every path or command against a compiled allowlist.
 5. Execute each action independently and record its result.
+
+### Safety at a glance
+
+| Workflow | Read-only discovery | Required authorization | Independent execution boundary |
+| --- | --- | --- | --- |
+| `clean` | Known cache paths and fixed maintenance actions | Interactive group selection or `--yes` | Exact path and command allowlists |
+| `uninstall` | Explicitly installed desktop applications and Flatpaks | Interactive application selection or exact `--app` IDs with `--yes` | Package identifier validation, protected-package refusal, and a transaction preview |
+| `purge` | Reproducible project artifacts with known directory names | Interactive artifact selection or `--yes` | Exact in-home paths, no symlinks, and no `.git` traversal |
+| `update` | Exact GitHub Release asset for the current Linux target | Interactive confirmation or `--yes` | SHA-256 verification followed by atomic binary replacement |
+
+The uninstall path has an additional review gate:
+
+```text
+read-only catalog
+      -> exact application selection
+      -> package-manager transaction preview
+      -> confirmation
+      -> fixed source-specific command
+      -> recorded result, with user data preserved
+```
+
+`--dry-run` crosses every validation and preview boundary but stops before the operation that changes the machine. `--yes` skips prompts only; it does not bypass identifier, path, command, checksum, or protected-package validation.
 
 Additional protections include:
 
