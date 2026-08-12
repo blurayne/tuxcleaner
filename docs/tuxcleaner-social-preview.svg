@@ -36,11 +36,11 @@
       <text x="348.5" y="24" text-anchor="middle" fill="#2e3436">PACMAN · APT · DNF</text>
     </g>
 
-    <rect x="0" y="338" width="548" height="94" rx="13" fill="#ffffff" opacity="0.86"/>
-    <circle cx="22" cy="363" r="5" fill="#33d17a"/>
-    <text x="38" y="368" font-family="JetBrains Mono, monospace" font-size="13" fill="#3584e4">curl -LsSf \</text>
-    <text x="20" y="398" font-family="JetBrains Mono, monospace" font-size="13" fill="#3584e4">https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh | sh</text>
-    <text x="2" y="484" font-family="Adwaita Sans, sans-serif" font-size="16" font-weight="750" fill="#5e6570">github.com/debba/tuxcleaner</text>
+    <rect x="0" y="330" width="548" height="122" rx="13" fill="#1e1e1e"/>
+    <text x="22" y="362" font-family="JetBrains Mono, monospace" font-size="13" xml:space="preserve"><tspan fill="#57e389">$</tspan><tspan fill="#deddda"> curl </tspan><tspan fill="#62a0ea">-LsSf</tspan><tspan fill="#deddda"> \</tspan></text>
+    <text x="36" y="395" font-family="JetBrains Mono, monospace" font-size="12.5" fill="#62a0ea">https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh \</text>
+    <text x="36" y="428" font-family="JetBrains Mono, monospace" font-size="13" fill="#deddda">| sh</text>
+    <text x="2" y="497" font-family="Adwaita Sans, sans-serif" font-size="16" font-weight="750" fill="#5e6570">github.com/debba/tuxcleaner</text>
   </g>
 
   <rect x="664" y="136" width="568" height="367" rx="15" fill="#1e1e1e" filter="url(#shadow)"/>
