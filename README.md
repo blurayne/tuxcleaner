@@ -4,6 +4,10 @@ TuxCleaner is a safety-first Linux cleanup, application uninstall, disk analysis
 
 The project is currently an MVP. It supports Arch Linux derivatives, Debian and Ubuntu derivatives, and Fedora and RHEL derivatives.
 
+![TuxCleaner feature tour using fictional data](docs/tuxcleaner-demo.gif)
+
+The [VHS tour](docs/tuxcleaner-demo.tape) runs the compiled CLI against isolated fictional files and package-manager fixtures. Every changing command uses dry-run mode, so no real package or user data is removed.
+
 ## Features
 
 - Interactive terminal menu built with Ratatui
@@ -19,10 +23,6 @@ The project is currently an MVP. It supports Arch Linux derivatives, Debian and 
 - JSON output for automation
 - Dry-run support and JSONL operation history
 - Checksum-verified self-updates from GitHub Releases
-
-![TuxCleaner uninstall dry-run demo using fictional data](docs/tuxcleaner-demo.gif)
-
-The [VHS tour](docs/tuxcleaner-demo.tape) runs the compiled CLI against isolated fictional files and package-manager fixtures. Every changing command uses dry-run mode, so no real package or user data is removed.
 
 ## Install
 
