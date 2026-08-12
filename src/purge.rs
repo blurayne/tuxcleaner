@@ -1,0 +1,111 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+use walkdir::{DirEntry, WalkDir};
+
+use crate::model::{CleanupAction, CleanupGroup, CleanupItem, Risk};
+use crate::scanner::dir_size;
+
+const ARTIFACTS: &[&str] = &["node_modules", "target", ".build", "build", "dist", ".venv"];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PurgeCandidate {
+    pub path: PathBuf,
+    pub kind: String,
+    pub size: u64,
+    pub modified_unix: Option<u64>,
+    pub age_days: u64,
+}
+
+impl PurgeCandidate {
+    pub fn cleanup_item(&self) -> CleanupItem {
+        CleanupItem {
+            id: format!("purge:{}", self.path.display()),
+            group: CleanupGroup::Dev,
+            label: format!("{} ({})", self.path.display(), self.kind),
+            estimated_bytes: self.size,
+            risk: Risk::Explicit,
+            action: CleanupAction::RemovePath {
+                path: self.path.clone(),
+                contents_only: false,
+            },
+        }
+    }
+}
+
+pub fn scan_artifacts(roots: &[PathBuf], older_than_days: u64) -> Vec<PurgeCandidate> {
+    let now = SystemTime::now();
+    let minimum_age = Duration::from_secs(older_than_days.saturating_mul(86_400));
+    let mut candidates = Vec::new();
+
+    for root in roots.iter().filter(|root| root.exists()) {
+        let walker = WalkDir::new(root)
+            .max_depth(7)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(visit_project_entry);
+        for entry in walker.filter_map(Result::ok) {
+            if !entry.file_type().is_dir() || !is_artifact(entry.path()) {
+                continue;
+            }
+            let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+            let age = now.duration_since(modified).unwrap_or_default();
+            if age < minimum_age {
+                continue;
+            }
+            candidates.push(PurgeCandidate {
+                path: entry.path().to_path_buf(),
+                kind: entry.file_name().to_string_lossy().into_owned(),
+                size: dir_size(entry.path()),
+                modified_unix: modified
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| duration.as_secs()),
+                age_days: age.as_secs() / 86_400,
+            });
+        }
+    }
+
+    candidates.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+    candidates
+}
+
+fn visit_project_entry(entry: &DirEntry) -> bool {
+    entry.depth() == 0 || entry.file_name() != ".git"
+}
+
+fn is_artifact(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| ARTIFACTS.contains(&name))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn finds_build_artifacts_but_never_git_contents() {
+        let root = tempdir().unwrap();
+        let target = root.path().join("project/target");
+        let hidden_target = root.path().join("project/.git/target");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(&hidden_target).unwrap();
+        fs::write(target.join("binary"), vec![0; 50]).unwrap();
+        fs::write(hidden_target.join("object"), vec![0; 100]).unwrap();
+
+        let results = scan_artifacts(&[root.path().to_path_buf()], 0);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, target);
+    }
+}

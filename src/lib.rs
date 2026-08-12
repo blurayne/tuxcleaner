@@ -1,0 +1,12 @@
+pub mod analyze;
+pub mod cli;
+pub mod distro;
+pub mod executor;
+pub mod history;
+pub mod model;
+pub mod purge;
+pub mod scanner;
+pub mod size;
+pub mod status;
+pub mod tui;
+pub mod update;
