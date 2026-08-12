@@ -205,7 +205,7 @@ sh tests/install.sh
 
 Tests cover distribution fixtures, application catalog providers, protected-package rejection, exact uninstall commands, size parsing, traversal exclusions, symlink behavior, history ordering, dry-run preservation, and JSON CLI contracts. CI also runs smoke tests in Arch, Ubuntu, and Fedora containers.
 
-The README tour is recorded from `docs/tuxcleaner-demo.tape` with fictional fixtures. Regenerate it with `scripts/render-demo.sh`; this optional documentation task requires VHS, ttyd, ffmpeg, and JetBrains Mono.
+The README tour is recorded from `docs/tuxcleaner-demo.tape` with fictional fixtures. Regenerate it with `scripts/render-demo.sh`; this optional documentation task requires VHS, ttyd, ffmpeg, ImageMagick, Adwaita Sans, and JetBrains Mono.
 
 ## Credits and license
 

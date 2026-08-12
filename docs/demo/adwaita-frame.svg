@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1248" height="824" viewBox="0 0 1248 824">
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#1c1c1c" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <rect width="1248" height="824" fill="#d8dee9"/>
+  <rect x="24" y="24" width="1200" height="776" rx="16" fill="#1e1e1e" filter="url(#shadow)"/>
+
+  <path d="M40 24h1168a16 16 0 0 1 16 16v40H24V40a16 16 0 0 1 16-16z" fill="#ebebeb"/>
+  <path d="M24 80h1200" stroke="#c9c9c9"/>
+
+  <rect x="44" y="36" width="108" height="32" rx="16" fill="#3584e4"/>
+  <text x="98" y="57" text-anchor="middle" font-family="Adwaita Sans, sans-serif" font-size="13" font-weight="700" fill="#ffffff">DEMO DATA</text>
+
+  <text x="624" y="59" text-anchor="middle" font-family="Adwaita Sans, sans-serif" font-size="17" font-weight="700" fill="#2e3436">TuxCleaner - Feature tour</text>
+
+  <g fill="#deddda">
+    <rect x="1082" y="35" width="34" height="34" rx="10"/>
+    <rect x="1124" y="35" width="34" height="34" rx="10"/>
+    <rect x="1166" y="35" width="34" height="34" rx="10"/>
+  </g>
+  <path d="M1093 53h12" stroke="#5e5c64" stroke-width="2" stroke-linecap="round"/>
+  <rect x="1135" y="46" width="12" height="12" rx="2" fill="none" stroke="#5e5c64" stroke-width="2"/>
+  <path d="M1177 46l12 12m0-12-12 12" stroke="#5e5c64" stroke-width="2" stroke-linecap="round"/>
+</svg>

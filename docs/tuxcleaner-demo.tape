@@ -1,4 +1,4 @@
-Output docs/tuxcleaner-demo.gif
+Output "/tmp/tuxcleaner-vhs-demo/raw.gif"
 
 Require ttyd
 Require ffmpeg
@@ -9,9 +9,6 @@ Set FontSize 18
 Set Width 1200
 Set Height 720
 Set Padding 22
-Set Margin 24
-Set MarginFill "#d8dee9"
-Set WindowBar RingsRight
 Set BorderRadius 16
 Set Theme { "name": "Adwaita Dark", "black": "#1e1e1e", "red": "#ed333b", "green": "#33d17a", "yellow": "#f6d32d", "blue": "#3584e4", "magenta": "#c061cb", "cyan": "#33c7de", "white": "#deddda", "brightBlack": "#77767b", "brightRed": "#f66151", "brightGreen": "#57e389", "brightYellow": "#f8e45c", "brightBlue": "#62a0ea", "brightMagenta": "#dc8add", "brightCyan": "#5bc8e7", "brightWhite": "#ffffff", "background": "#1e1e1e", "foreground": "#deddda", "selection": "#3584e4", "cursor": "#f6d32d" }
 Set TypingSpeed 32ms
