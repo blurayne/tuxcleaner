@@ -24,13 +24,18 @@ Docker cleanup uses `docker system prune -f` without `--volumes`. TuxCleaner doe
 
 Large personal files found by `analyze` are read-only results. The command offers no deletion mode.
 
+## Application uninstall trust boundary
+
+TuxCleaner lists only explicitly installed native packages that own visible desktop entries, plus Flatpak applications. Automated uninstall requires a source-qualified ID returned by the current catalog. The executor rejects malformed identifiers, mismatched IDs, protected system packages, and unexpected command shapes.
+
+Native package managers must return a transaction preview before confirmation. A preview may include dependencies selected by the package manager, so users should review the full plan. TuxCleaner preserves application configuration and user data, including Flatpak data under `~/.var/app`.
+
 ## Privilege model
 
-Package cache and journal cleanup use `sudo -- <program> <arguments>` when the process is not already running as root. User caches, developer caches, Docker, Flatpak, and project artifacts do not request privilege escalation.
+Package cache, native application uninstall, and journal cleanup use `sudo -- <program> <arguments>` when the process is not already running as root. User caches, developer caches, Docker, Flatpak, and project artifacts do not request privilege escalation.
 
 Do not run the complete TuxCleaner process as root. Use the normal user account and allow the narrow `sudo` commands after reviewing the selected system group.
 
 ## Reporting a vulnerability
 
 Please open a private security advisory in the project repository. Include the affected version, exact command, distribution, expected safety boundary, and a minimal reproduction. Do not include personal file paths, credentials, or command history containing sensitive data.
-

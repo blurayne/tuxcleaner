@@ -12,7 +12,7 @@ Run these commands before considering a change complete:
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
-sh -n install.sh scripts/package-release.sh
+sh -n install.sh scripts/package-release.sh scripts/render-demo.sh docs/demo/fixtures/bin/*
 sh tests/install.sh
 ```
 
@@ -29,11 +29,15 @@ sh tests/install.sh
 - Large personal files and hidden application data are reported only, never deleted by `analyze`.
 - System operations may use narrow `sudo` commands. User cleanup must not use sudo.
 - Self-updates must use exact release assets and verify SHA-256 before replacement.
+- Application IDs must come from the current catalog and match their source and package exactly.
+- Native application uninstall must show a package-manager transaction preview before execution.
+- Application configuration and user data are outside uninstall scope.
 
 ## Architecture
 
 - Keep distribution-specific behavior in `src/distro.rs`.
 - Keep discovery separate from execution.
+- Keep application discovery and protected-package policy in `src/uninstall.rs`.
 - Model cleanup operations with `CleanupAction` rather than direct filesystem calls from scanners.
 - Keep path and command validation in `src/executor.rs`.
 - Preserve JSON output compatibility by adding fields rather than renaming or removing them.

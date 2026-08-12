@@ -1,0 +1,4 @@
+NAME="Demo Linux 42"
+ID=demo
+ID_LIKE=fedora
+PRETTY_NAME="Demo Linux 42"

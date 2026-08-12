@@ -1,12 +1,12 @@
 [package]
 name = "tuxcleaner"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
-description = "A safety-first Linux cleanup and disk analysis toolkit"
+description = "A safety-first Linux cleanup, application uninstall, and disk analysis toolkit"
 license = "GPL-3.0-only"
 repository = "https://github.com/debba/tuxcleaner"
-keywords = ["linux", "cleanup", "disk", "tui", "system"]
+keywords = ["linux", "cleanup", "uninstall", "disk", "tui"]
 categories = ["command-line-utilities"]
 
 [dependencies]

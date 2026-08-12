@@ -15,6 +15,7 @@ Contributions are welcome, especially new distribution adapters and cleanup rule
 3. Add an exact executor allowlist entry for every new external command.
 4. Add tests that prove both the intended action and relevant refusal cases.
 5. Update the safety documentation when a trust boundary changes.
+6. For uninstall providers, require explicit-install discovery, transaction previews, exact identifiers, and protected-package refusal tests.
 
 Run the full local validation before opening a pull request:
 
@@ -25,4 +26,3 @@ cargo test --all-targets
 ```
 
 Public documentation and change descriptions should be written in English. Keep commits focused and do not add generated co-author trailers.
-

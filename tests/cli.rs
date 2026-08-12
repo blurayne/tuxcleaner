@@ -16,10 +16,100 @@ fn help_lists_the_mvp_commands() {
         .assert()
         .success()
         .stdout(predicate::str::contains("clean"))
+        .stdout(predicate::str::contains("uninstall"))
         .stdout(predicate::str::contains("analyze"))
         .stdout(predicate::str::contains("purge"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("history"));
+}
+
+#[test]
+fn uninstall_yes_requires_exact_application_ids() {
+    command()
+        .args(["uninstall", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "requires at least one exact --app",
+        ));
+}
+
+#[test]
+fn uninstall_dry_run_uses_fixture_catalog_without_removing_anything() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempdir().unwrap();
+    let state = tempdir().unwrap();
+    let fake_bin = home.path().join("bin");
+    let desktop_dir = home.path().join("desktop");
+    let desktop = desktop_dir.join("firefox.desktop");
+    let os_release = home.path().join("os-release");
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::create_dir_all(&desktop_dir).unwrap();
+    fs::write(&os_release, "NAME=Arch Linux\nID=arch\n").unwrap();
+    fs::write(
+        &desktop,
+        "[Desktop Entry]\nType=Application\nName=Firefox\n",
+    )
+    .unwrap();
+
+    let pacman = fake_bin.join("pacman");
+    fs::write(
+        &pacman,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\n  -Qqe) printf 'firefox\\n' ;;\n  -Qqo) printf 'firefox\\n' ;;\n  -Qi) printf 'Name : firefox\\nVersion : 1.0-1\\nInstalled Size : 250 MiB\\n' ;;\n  -Rs) printf 'firefox\\t1.0-1\\t262144000\\n' ;;\n  *) exit 1 ;;\nesac\n# {}\n",
+            desktop.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&pacman, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path = format!("{}:/usr/bin:/bin", fake_bin.display());
+    let output = command()
+        .args([
+            "uninstall",
+            "--app",
+            "pacman:firefox",
+            "--dry-run",
+            "--yes",
+            "--json",
+        ])
+        .env("HOME", home.path())
+        .env("PATH", path)
+        .env("XDG_STATE_HOME", state.path())
+        .env("TUXCLEANER_OS_RELEASE", os_release)
+        .env("TUXCLEANER_DESKTOP_DIRS", &desktop_dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["applications"][0]["id"], "pacman:firefox");
+    assert_eq!(value["results"][0]["dry_run"], true);
+    assert!(desktop.exists());
+
+    command()
+        .args([
+            "uninstall",
+            "--app",
+            "pacman:not-installed",
+            "--dry-run",
+            "--yes",
+            "--json",
+        ])
+        .env("HOME", home.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
+        .env("XDG_STATE_HOME", state.path())
+        .env("TUXCLEANER_OS_RELEASE", home.path().join("os-release"))
+        .env("TUXCLEANER_DESKTOP_DIRS", &desktop_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "none of the requested application IDs were found",
+        ));
 }
 
 #[test]

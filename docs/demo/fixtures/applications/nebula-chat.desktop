@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Nebula Chat
+Exec=nebula-chat
+Icon=com.example.NebulaChat
+Categories=Network;

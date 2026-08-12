@@ -16,6 +16,7 @@ use crate::model::{ActionResult, CleanupGroup, ScanReport};
 use crate::purge::{PurgeCandidate, scan_artifacts};
 use crate::scanner::Scanner;
 use crate::size::{format_bytes, parse_size};
+use crate::uninstall::{Application, ApplicationCatalog, ApplicationReport, ApplicationSource};
 use crate::update;
 use crate::{status, tui};
 
@@ -23,7 +24,7 @@ use crate::{status, tui};
 #[command(
     name = "tuxcleaner",
     version,
-    about = "A safety-first Linux cleanup and disk analysis toolkit",
+    about = "A safety-first Linux cleanup, application uninstall, and disk analysis toolkit",
     after_help = "Run without a subcommand to open the interactive menu. Destructive commands always require a selection or --yes."
 )]
 pub struct Cli {
@@ -35,6 +36,8 @@ pub struct Cli {
 pub enum Commands {
     /// Scan known caches and clean explicitly selected groups
     Clean(CleanArgs),
+    /// List installed desktop applications and uninstall explicit selections
+    Uninstall(UninstallArgs),
     /// Analyze disk usage and find large files without deleting anything
     Analyze(AnalyzeArgs),
     /// Find and remove old project build artifacts
@@ -58,6 +61,28 @@ pub struct CleanArgs {
     /// Restrict cleanup to one or more groups
     #[arg(long, value_enum, value_delimiter = ',')]
     pub groups: Vec<CleanupGroup>,
+    /// Emit machine-readable JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+pub struct UninstallArgs {
+    /// Preview removal plans without changing the system
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Confirm exact --app selections non-interactively
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Select an application by its source-qualified ID; may be repeated
+    #[arg(long = "app", value_name = "SOURCE:PACKAGE")]
+    pub applications: Vec<String>,
+    /// Restrict discovery to one or more application sources
+    #[arg(long, value_enum, value_delimiter = ',')]
+    pub source: Vec<ApplicationSource>,
+    /// Filter applications by display name, package name, or ID
+    #[arg(long)]
+    pub search: Option<String>,
     /// Emit machine-readable JSON
     #[arg(long)]
     pub json: bool,
@@ -172,6 +197,7 @@ pub fn run(cli: Cli) -> Result<()> {
             if let Some(action) = tui::interactive_menu()? {
                 run_command(match action {
                     tui::MenuAction::Clean => Commands::Clean(CleanArgs::default()),
+                    tui::MenuAction::Uninstall => Commands::Uninstall(UninstallArgs::default()),
                     tui::MenuAction::Analyze => Commands::Analyze(AnalyzeArgs::default()),
                     tui::MenuAction::Purge => Commands::Purge(PurgeArgs::default()),
                     tui::MenuAction::Status => Commands::Status(StatusArgs::default()),
@@ -193,11 +219,234 @@ pub fn run(cli: Cli) -> Result<()> {
 pub fn run_command(command: Commands) -> Result<()> {
     match command {
         Commands::Clean(args) => run_clean(args),
+        Commands::Uninstall(args) => run_uninstall(args),
         Commands::Analyze(args) => run_analyze(args),
         Commands::Purge(args) => run_purge(args),
         Commands::Status(args) => run_status(args),
         Commands::History(args) => run_history(args),
         Commands::Update(args) => run_update(args),
+    }
+}
+
+fn run_uninstall(args: UninstallArgs) -> Result<()> {
+    if !args.yes && !args.json && !io::stdin().is_terminal() {
+        bail!(
+            "uninstall needs an interactive terminal; use --app SOURCE:PACKAGE with --dry-run --yes to preview or --yes to confirm"
+        );
+    }
+    if args.yes && args.applications.is_empty() {
+        bail!("uninstall --yes requires at least one exact --app SOURCE:PACKAGE selection");
+    }
+
+    let home = home_dir()?;
+    let distro = Distribution::detect()?;
+    let mut report = ApplicationCatalog::system_default(home.clone(), distro.clone()).discover();
+    filter_applications(&mut report, &args);
+
+    if args.json && !args.yes {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if !args.json {
+        print_application_report(&report);
+    }
+    if report.applications.is_empty() {
+        if !args.applications.is_empty() {
+            bail!(
+                "none of the requested application IDs were found in the current filtered catalog; run `tuxcleaner uninstall --json` to list valid IDs"
+            );
+        }
+        if !args.json {
+            println!("No matching applications found.");
+        }
+        return Ok(());
+    }
+
+    let selected = if !args.applications.is_empty() {
+        select_exact_applications(&report.applications, &args.applications)?
+    } else {
+        choose_applications(&report.applications)?
+    };
+    if selected.is_empty() {
+        if !args.json {
+            println!("Nothing selected.");
+        }
+        return Ok(());
+    }
+
+    let executor = Executor::new(home);
+    let previews: Vec<_> = selected
+        .iter()
+        .map(|application| executor.preview_uninstall(application))
+        .collect::<Result<_, _>>()
+        .map_err(anyhow::Error::msg)?;
+    if !args.json {
+        print_uninstall_previews(&selected, &previews);
+    }
+
+    if !args.dry_run
+        && !args.yes
+        && !Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!(
+                "Uninstall {} selected application(s) while preserving user data?",
+                selected.len()
+            ))
+            .default(false)
+            .interact()?
+    {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    let results: Vec<_> = selected
+        .iter()
+        .map(|application| executor.execute_uninstall(application, args.dry_run))
+        .collect();
+    record_history(&distro.name, "uninstall", &results);
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "applications": selected,
+                "previews": previews,
+                "results": results,
+            }))?
+        );
+    } else {
+        print_results(&results);
+        println!("Application configuration and user data were preserved.");
+    }
+    fail_if_actions_failed(&results)
+}
+
+fn filter_applications(report: &mut ApplicationReport, args: &UninstallArgs) {
+    if !args.source.is_empty() {
+        report
+            .applications
+            .retain(|application| args.source.contains(&application.source));
+    }
+    if let Some(search) = args.search.as_deref() {
+        let search = search.to_ascii_lowercase();
+        report.applications.retain(|application| {
+            application.name.to_ascii_lowercase().contains(&search)
+                || application.package.to_ascii_lowercase().contains(&search)
+                || application.id.to_ascii_lowercase().contains(&search)
+        });
+    }
+    if !args.applications.is_empty() {
+        report
+            .applications
+            .retain(|application| args.applications.contains(&application.id));
+    }
+}
+
+fn select_exact_applications(
+    catalog: &[Application],
+    requested: &[String],
+) -> Result<Vec<Application>> {
+    let mut selected = Vec::new();
+    for id in requested {
+        let application = catalog
+            .iter()
+            .find(|application| application.id == *id)
+            .with_context(|| {
+                format!(
+                    "application {id} was not found in the current filtered catalog; run `tuxcleaner uninstall --json` to list valid IDs"
+                )
+            })?;
+        if !selected
+            .iter()
+            .any(|existing: &Application| existing.id == application.id)
+        {
+            selected.push(application.clone());
+        }
+    }
+    Ok(selected)
+}
+
+fn choose_applications(applications: &[Application]) -> Result<Vec<Application>> {
+    let labels: Vec<_> = applications
+        .iter()
+        .map(|application| {
+            format!(
+                "{:<28} {:>9}  {:<16} {}",
+                truncate(&application.name, 28),
+                format_bytes(application.installed_bytes),
+                application.source,
+                application.package
+            )
+        })
+        .collect();
+    let selection = MultiSelect::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select applications to uninstall (nothing is selected by default)")
+        .items(&labels)
+        .interact()?;
+    Ok(selection
+        .into_iter()
+        .map(|index| applications[index].clone())
+        .collect())
+}
+
+fn print_application_report(report: &ApplicationReport) {
+    println!("Installed applications on {}", report.distribution);
+    println!();
+    println!(
+        "  {:<28} {:>9}  {:<16} Package",
+        "Application", "Size", "Source"
+    );
+    for application in &report.applications {
+        println!(
+            "  {:<28} {:>9}  {:<16} {}",
+            truncate(&application.name, 28),
+            format_bytes(application.installed_bytes),
+            application.source,
+            application.package
+        );
+        if application.user_data_bytes > 0 {
+            println!(
+                "    User data preserved: {} across {} path(s)",
+                format_bytes(application.user_data_bytes),
+                application.user_data_paths.len()
+            );
+        }
+    }
+    for warning in &report.warnings {
+        println!("Warning: {warning}");
+    }
+}
+
+fn print_uninstall_previews(
+    applications: &[Application],
+    previews: &[crate::uninstall::UninstallPreview],
+) {
+    println!();
+    println!("Removal plan:");
+    for (application, preview) in applications.iter().zip(previews) {
+        println!("  {} ({})", application.name, application.id);
+        println!("    Command: {}", preview.command);
+        println!("    Packages or applications affected:");
+        for removal in &preview.removals {
+            println!("      - {removal}");
+        }
+        if application.user_data_bytes > 0 {
+            println!(
+                "    Preserved user data: {}",
+                format_bytes(application.user_data_bytes)
+            );
+        }
+    }
+}
+
+fn truncate(value: &str, maximum: usize) -> String {
+    let mut characters = value.chars();
+    let prefix: String = characters
+        .by_ref()
+        .take(maximum.saturating_sub(1))
+        .collect();
+    if characters.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        value.to_owned()
     }
 }
 
@@ -252,7 +501,7 @@ fn run_clean(args: CleanArgs) -> Result<()> {
         .iter()
         .map(|item| executor.execute(item, args.dry_run))
         .collect();
-    record_history(&distro.name, "clean", &results)?;
+    record_history(&distro.name, "clean", &results);
 
     if args.json {
         println!(
@@ -362,7 +611,7 @@ fn run_purge(args: PurgeArgs) -> Result<()> {
         .map(PurgeCandidate::cleanup_item)
         .map(|item| executor.execute(&item, args.dry_run))
         .collect();
-    record_history(&distro.name, "purge", &results)?;
+    record_history(&distro.name, "purge", &results);
     if args.json {
         println!(
             "{}",
@@ -546,13 +795,18 @@ fn default_project_roots(home: &std::path::Path) -> Result<Vec<PathBuf>> {
     }
 }
 
-fn record_history(distribution: &str, command: &str, results: &[ActionResult]) -> Result<()> {
-    HistoryStore::system_default()?.append(&HistoryRecord {
-        timestamp: Utc::now(),
-        distribution: distribution.into(),
-        command: command.into(),
-        results: results.to_vec(),
-    })
+fn record_history(distribution: &str, command: &str, results: &[ActionResult]) {
+    let outcome = HistoryStore::system_default().and_then(|store| {
+        store.append(&HistoryRecord {
+            timestamp: Utc::now(),
+            distribution: distribution.into(),
+            command: command.into(),
+            results: results.to_vec(),
+        })
+    });
+    if let Err(error) = outcome {
+        eprintln!("Warning: the operation completed, but history could not be recorded: {error:#}");
+    }
 }
 
 fn fail_if_actions_failed(results: &[ActionResult]) -> Result<()> {

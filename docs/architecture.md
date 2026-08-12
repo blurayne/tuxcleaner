@@ -17,6 +17,7 @@ The split supports three goals:
 | `cli` | Clap interface, confirmations, rendering, and command orchestration |
 | `tui` | Ratatui interactive entry menu |
 | `distro` | `os-release` parsing and package-manager actions |
+| `uninstall` | Visible desktop application discovery, package ownership, and protected-package policy |
 | `scanner` | Known system, user, developer, Docker, and Flatpak candidates |
 | `analyze` | Read-only disk aggregation and large-file reporting |
 | `purge` | Discovery of old reproducible project artifacts |
@@ -34,7 +35,17 @@ The split supports three goals:
 5. Add an `os-release` fixture and test the selected adapter.
 6. Add a container smoke-test entry.
 
-Package removal is intentionally outside the initial cleanup adapters. Orphan detection differs across package managers and can remove load-bearing packages. A future orphan feature must report exact package names and use a separate explicit confirmation.
+Application uninstall is separate from cleanup adapters. The catalog includes explicitly installed native packages only when they own a visible desktop entry. Flatpak applications are cataloged by installation scope. Each selection uses its exact source-qualified ID, receives a package-manager transaction preview, and passes the protected-package policy before execution. TuxCleaner never turns orphan detection into an automatic removal action.
+
+## Application uninstall invariants
+
+- Catalog discovery is read-only and runs without privilege.
+- Native applications must be explicitly installed and own a visible desktop entry.
+- Selection is empty by default and non-interactive use requires an exact `--app` ID with `--yes`.
+- Native removals receive a transaction preview before confirmation.
+- The executor validates the source, identifier, protected-package policy, and fixed argument shape independently.
+- Flatpak installation scope is preserved in both preview and execution.
+- Application configuration and user data are measured where available but never removed.
 
 ## Filesystem invariants
 
@@ -44,6 +55,6 @@ Deletion uses `remove_file` and `remove_dir_all` on exact `Path` values. No user
 
 ## Machine-readable interfaces
 
-The JSON structures are regular Serde models. Fields are additive within the `0.x` series. Automation should ignore unknown fields and must pass `--yes` to request destructive cleanup. Without `--yes`, `clean --json` returns inventory only.
+The JSON structures are regular Serde models. Fields are additive within the `0.x` series. Automation should ignore unknown fields and must pass `--yes` to request destructive cleanup. Without `--yes`, `clean --json` and `uninstall --json` return inventory only.
 
 The updater selects an exact target archive from GitHub release metadata, downloads its adjacent SHA-256 asset, verifies the complete archive, extracts only the `tuxcleaner` entry, and atomically replaces the current executable. `update --check` and `update --dry-run` stop before downloading or replacing the binary.

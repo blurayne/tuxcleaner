@@ -17,6 +17,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
     Clean,
+    Uninstall,
     Analyze,
     Purge,
     Status,
@@ -29,6 +30,11 @@ const MENU: &[(MenuAction, &str, &str)] = &[
         MenuAction::Clean,
         "Clean",
         "Review known package, application, and developer caches",
+    ),
+    (
+        MenuAction::Uninstall,
+        "Uninstall",
+        "List desktop applications and review exact removal plans",
     ),
     (
         MenuAction::Analyze,

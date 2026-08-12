@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+case "$*" in
+    'repoquery --installed --userinstalled --qf %{name}')
+        printf 'aurora-browser\nnebula-chat\n'
+        ;;
+    '--assumeno remove nebula-chat')
+        printf 'nebula-chat.x86_64 4.2.0-1 @demo 320 MiB\nOperation aborted.\n'
+        exit 1
+        ;;
+    '--assumeyes remove nebula-chat')
+        printf 'Demo fixture: nebula-chat removed\n'
+        ;;
+    *)
+        printf 'Unsupported demo DNF command: %s\n' "$*" >&2
+        exit 2
+        ;;
+esac

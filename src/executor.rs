@@ -4,6 +4,9 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
 
 use crate::model::{ActionResult, CleanupAction, CleanupItem};
+use crate::uninstall::{
+    Application, ApplicationSource, UninstallPreview, is_protected_package, is_valid_identifier,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutionError {
@@ -34,9 +37,15 @@ impl CommandRunner for ProcessCommandRunner {
                 .arg("--")
                 .arg(program)
                 .args(args)
+                .env("LC_ALL", "C")
+                .env("LANG", "C")
                 .output()
         } else {
-            Command::new(program).args(args).output()
+            Command::new(program)
+                .args(args)
+                .env("LC_ALL", "C")
+                .env("LANG", "C")
+                .output()
         }
     }
 }
@@ -103,6 +112,94 @@ impl<R: CommandRunner> Executor<R> {
             estimated_bytes: item.estimated_bytes,
             message: outcome
                 .map(|()| "completed".into())
+                .unwrap_or_else(|message| message),
+        }
+    }
+
+    pub fn preview_uninstall(&self, application: &Application) -> Result<UninstallPreview, String> {
+        validate_application(application)?;
+        let package = application.package.clone();
+        let (program, args, expected_success) = match application.source {
+            ApplicationSource::Pacman => (
+                "pacman",
+                vec![
+                    "-Rs".into(),
+                    "--print".into(),
+                    "--print-format".into(),
+                    "%n\t%v\t%s".into(),
+                    "--".into(),
+                    package.clone(),
+                ],
+                true,
+            ),
+            ApplicationSource::Apt => (
+                "apt-get",
+                vec!["--simulate".into(), "remove".into(), package.clone()],
+                true,
+            ),
+            ApplicationSource::Dnf => (
+                "dnf",
+                vec!["--assumeno".into(), "remove".into(), package.clone()],
+                false,
+            ),
+            ApplicationSource::FlatpakUser | ApplicationSource::FlatpakSystem => {
+                return Ok(UninstallPreview {
+                    application_id: application.id.clone(),
+                    command: uninstall_command_display(application),
+                    removals: vec![format!("{} ({})", application.package, application.version)],
+                    raw: "Flatpak application data is preserved by default.".into(),
+                    preserves_user_data: true,
+                });
+            }
+        };
+        let output = self
+            .runner
+            .run(program, &args, false)
+            .map_err(|error| format!("failed to preview {}: {error}", application.id))?;
+        let raw = combined_output(&output);
+        if expected_success && !output.status.success() {
+            return Err(format!(
+                "preview command exited with {}: {}",
+                output.status,
+                raw.trim()
+            ));
+        }
+        if !expected_success && !output.status.success() && !raw.contains(&package) {
+            return Err(format!(
+                "DNF could not produce a removal plan for {}: {}",
+                application.id,
+                raw.trim()
+            ));
+        }
+        let removals = parse_uninstall_removals(application.source, &raw);
+        if removals.is_empty() {
+            return Err(format!(
+                "the package manager returned an empty removal plan for {}",
+                application.id
+            ));
+        }
+        Ok(UninstallPreview {
+            application_id: application.id.clone(),
+            command: uninstall_command_display(application),
+            removals,
+            raw,
+            preserves_user_data: true,
+        })
+    }
+
+    pub fn execute_uninstall(&self, application: &Application, dry_run: bool) -> ActionResult {
+        let outcome = validate_application(application).and_then(|()| {
+            let (program, args, requires_root) = uninstall_command(application);
+            self.execute_command(program, &args, requires_root, dry_run)
+        });
+        ActionResult {
+            item_id: application.id.clone(),
+            label: format!("Uninstall {} ({})", application.name, application.id),
+            success: outcome.is_ok(),
+            dry_run,
+            estimated_bytes: application.installed_bytes,
+            message: outcome
+                .map(|()| "completed; user data preserved".into())
                 .unwrap_or_else(|message| message),
         }
     }
@@ -279,7 +376,7 @@ fn remove_entry(path: &Path) -> Result<(), ExecutionError> {
 
 fn is_allowed_command(program: &str, args: &[String], requires_root: bool) -> bool {
     let values: Vec<&str> = args.iter().map(String::as_str).collect();
-    matches!(
+    if matches!(
         (program, values.as_slice(), requires_root),
         ("paccache", ["-rk1"], true)
             | ("paccache", ["-ruk0"], true)
@@ -288,7 +385,123 @@ fn is_allowed_command(program: &str, args: &[String], requires_root: bool) -> bo
             | ("journalctl", ["--vacuum-size=200M"], true)
             | ("docker", ["system", "prune", "-f"], false)
             | ("flatpak", ["uninstall", "--unused", "-y"], false)
-    )
+    ) {
+        return true;
+    }
+    match (program, values.as_slice(), requires_root) {
+        ("pacman", ["-Rns", "--noconfirm", "--", package], true)
+        | ("apt-get", ["--yes", "remove", package], true)
+        | ("dnf", ["--assumeyes", "remove", package], true) => {
+            is_valid_identifier(package) && !is_protected_package(package)
+        }
+        ("flatpak", ["uninstall", "--user", "-y", application], false)
+        | ("flatpak", ["uninstall", "--system", "-y", application], false) => {
+            is_valid_identifier(application)
+        }
+        _ => false,
+    }
+}
+
+fn validate_application(application: &Application) -> Result<(), String> {
+    if !is_valid_identifier(&application.package)
+        || application.id != Application::new_id(application.source, &application.package)
+        || (!application.source.is_flatpak() && is_protected_package(&application.package))
+    {
+        return Err(format!(
+            "unsafe or protected application identifier rejected: {}",
+            application.id
+        ));
+    }
+    Ok(())
+}
+
+fn uninstall_command(application: &Application) -> (&'static str, Vec<String>, bool) {
+    let package = application.package.clone();
+    match application.source {
+        ApplicationSource::Pacman => (
+            "pacman",
+            vec!["-Rns".into(), "--noconfirm".into(), "--".into(), package],
+            true,
+        ),
+        ApplicationSource::Apt => (
+            "apt-get",
+            vec!["--yes".into(), "remove".into(), package],
+            true,
+        ),
+        ApplicationSource::Dnf => (
+            "dnf",
+            vec!["--assumeyes".into(), "remove".into(), package],
+            true,
+        ),
+        ApplicationSource::FlatpakUser => (
+            "flatpak",
+            vec!["uninstall".into(), "--user".into(), "-y".into(), package],
+            false,
+        ),
+        ApplicationSource::FlatpakSystem => (
+            "flatpak",
+            vec!["uninstall".into(), "--system".into(), "-y".into(), package],
+            false,
+        ),
+    }
+}
+
+fn uninstall_command_display(application: &Application) -> String {
+    let (program, args, requires_root) = uninstall_command(application);
+    let prefix = if requires_root { "sudo -- " } else { "" };
+    format!("{prefix}{program} {}", args.join(" "))
+}
+
+fn combined_output(output: &Output) -> String {
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        if !text.ends_with('\n') && !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&stderr);
+    }
+    text
+}
+
+fn parse_uninstall_removals(source: ApplicationSource, raw: &str) -> Vec<String> {
+    match source {
+        ApplicationSource::Pacman => raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let fields: Vec<_> = line.split('\t').collect();
+                if fields.len() >= 3 {
+                    let size = fields[2]
+                        .parse::<u64>()
+                        .map(crate::size::format_bytes)
+                        .unwrap_or_else(|_| fields[2].into());
+                    format!("{} {} ({size})", fields[0], fields[1])
+                } else {
+                    line.trim().to_owned()
+                }
+            })
+            .collect(),
+        ApplicationSource::Apt => raw
+            .lines()
+            .filter_map(|line| line.strip_prefix("Remv "))
+            .filter_map(|line| line.split_whitespace().next())
+            .map(str::to_owned)
+            .collect(),
+        ApplicationSource::Dnf => raw
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                !line.is_empty()
+                    && !line.starts_with("Dependencies resolved")
+                    && !line.starts_with("Transaction Summary")
+                    && !line.starts_with("Operation aborted")
+            })
+            .take(80)
+            .map(str::to_owned)
+            .collect(),
+        ApplicationSource::FlatpakUser | ApplicationSource::FlatpakSystem => Vec::new(),
+    }
 }
 
 fn is_effective_root() -> bool {
@@ -307,6 +520,7 @@ fn is_effective_root() -> bool {
 #[cfg(test)]
 mod tests {
     use std::os::unix::process::ExitStatusExt;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::model::{CleanupGroup, Risk};
@@ -382,5 +596,94 @@ mod tests {
         let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
         assert!(executor.execute(&item(target.clone()), true).success);
         assert!(target.exists());
+    }
+
+    fn application(package: &str) -> Application {
+        Application {
+            id: Application::new_id(ApplicationSource::Pacman, package),
+            name: package.into(),
+            package: package.into(),
+            version: "1.0".into(),
+            source: ApplicationSource::Pacman,
+            installed_bytes: 100,
+            user_data_bytes: 0,
+            desktop_file: None,
+            user_data_paths: Vec::new(),
+        }
+    }
+
+    type RecordedCalls = Arc<Mutex<Vec<(String, Vec<String>, bool)>>>;
+
+    struct RecordingRunner {
+        calls: RecordedCalls,
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run(
+            &self,
+            program: &str,
+            args: &[String],
+            requires_root: bool,
+        ) -> std::io::Result<Output> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((program.into(), args.to_vec(), requires_root));
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: b"firefox\t1.0\t100\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn uninstall_uses_an_exact_source_specific_command() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = Executor::with_runner(
+            PathBuf::from("/home/tester"),
+            RecordingRunner {
+                calls: calls.clone(),
+            },
+        );
+        let result = executor.execute_uninstall(&application("firefox"), false);
+        assert!(result.success, "{}", result.message);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [(
+                "pacman".into(),
+                vec![
+                    "-Rns".into(),
+                    "--noconfirm".into(),
+                    "--".into(),
+                    "firefox".into()
+                ],
+                true,
+            )]
+        );
+    }
+
+    #[test]
+    fn uninstall_preview_reports_package_manager_impact() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let executor =
+            Executor::with_runner(PathBuf::from("/home/tester"), RecordingRunner { calls });
+        let preview = executor.preview_uninstall(&application("firefox")).unwrap();
+        assert_eq!(preview.removals, ["firefox 1.0 (100 B)"]);
+        assert!(preview.preserves_user_data);
+    }
+
+    #[test]
+    fn protected_packages_never_reach_the_command_runner() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = Executor::with_runner(
+            PathBuf::from("/home/tester"),
+            RecordingRunner {
+                calls: calls.clone(),
+            },
+        );
+        let result = executor.execute_uninstall(&application("systemd"), false);
+        assert!(!result.success);
+        assert!(calls.lock().unwrap().is_empty());
     }
 }

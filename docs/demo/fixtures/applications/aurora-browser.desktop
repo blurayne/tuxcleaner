@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Aurora Browser
+Exec=aurora-browser
+Icon=com.example.AuroraBrowser
+Categories=Network;

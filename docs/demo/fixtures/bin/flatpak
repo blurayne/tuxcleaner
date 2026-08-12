@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = 'list' ]; then
+    exit 0
+fi
+
+printf 'Unsupported demo Flatpak command: %s\n' "$*" >&2
+exit 2

@@ -9,4 +9,5 @@ pub mod scanner;
 pub mod size;
 pub mod status;
 pub mod tui;
+pub mod uninstall;
 pub mod update;

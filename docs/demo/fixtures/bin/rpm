@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = '-qf' ]; then
+    last=''
+    for argument do
+        last=$argument
+    done
+    case "$last" in
+        */nebula-chat.desktop) printf 'nebula-chat\n' ;;
+        */aurora-browser.desktop) printf 'aurora-browser\n' ;;
+        *) exit 1 ;;
+    esac
+    exit 0
+fi
+
+if [ "${1:-}" = '-q' ]; then
+    case " $* " in
+        *' aurora-browser '*) printf 'aurora-browser\t8.1.0-2\t260046848\n' ;;
+    esac
+    case " $* " in
+        *' nebula-chat '*) printf 'nebula-chat\t4.2.0-1\t335544320\n' ;;
+    esac
+    exit 0
+fi
+
+printf 'Unsupported demo RPM command: %s\n' "$*" >&2
+exit 2

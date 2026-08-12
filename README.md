@@ -1,6 +1,6 @@
 # TuxCleaner
 
-TuxCleaner is a safety-first Linux cleanup, disk analysis, project artifact, and system status tool written in Rust. Its interaction model is inspired by [Mole](https://github.com/tw93/Mole), while its Linux cleanup rules are implemented independently around distribution-specific adapters.
+TuxCleaner is a safety-first Linux cleanup, application uninstall, disk analysis, project artifact, and system status tool written in Rust. Its interaction model is inspired by [Mole](https://github.com/tw93/Mole), while its Linux rules are implemented independently around distribution-specific adapters.
 
 The project is currently an MVP. It supports Arch Linux derivatives, Debian and Ubuntu derivatives, and Fedora and RHEL derivatives.
 
@@ -9,6 +9,7 @@ The project is currently an MVP. It supports Arch Linux derivatives, Debian and 
 - Interactive terminal menu built with Ratatui
 - Distribution detection through `/etc/os-release`
 - Package cleanup adapters for `pacman`, `apt`, and `dnf`
+- Explicit desktop application discovery and uninstall for `pacman`, APT, DNF, and Flatpak
 - Known user, browser, and developer cache scanning
 - Docker cleanup that never includes volumes
 - Unused Flatpak runtime cleanup
@@ -18,6 +19,10 @@ The project is currently an MVP. It supports Arch Linux derivatives, Debian and 
 - JSON output for automation
 - Dry-run support and JSONL operation history
 - Checksum-verified self-updates from GitHub Releases
+
+![TuxCleaner uninstall dry-run demo using fictional data](docs/tuxcleaner-demo.gif)
+
+The [VHS tour](docs/tuxcleaner-demo.tape) runs the compiled CLI against isolated fictional files and package-manager fixtures. Every changing command uses dry-run mode, so no real package or user data is removed.
 
 ## Install
 
@@ -33,7 +38,7 @@ Install a specific version or directory:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh \
-  | TUXCLEANER_VERSION=0.1.0 TUXCLEANER_INSTALL_DIR="$HOME/bin" sh
+  | TUXCLEANER_VERSION=0.2.0 TUXCLEANER_INSTALL_DIR="$HOME/bin" sh
 ```
 
 To inspect the installer before running it:
@@ -69,6 +74,11 @@ tuxcleaner clean --dry-run --yes
 tuxcleaner clean --groups system,user --yes
 tuxcleaner clean --json
 
+tuxcleaner uninstall
+tuxcleaner uninstall --search firefox
+tuxcleaner uninstall --json
+tuxcleaner uninstall --app pacman:firefox --dry-run --yes
+
 tuxcleaner analyze
 tuxcleaner analyze ~/Downloads --min-size 1GiB
 tuxcleaner analyze --json
@@ -95,6 +105,7 @@ Every command that can change the machine supports a dry run:
 | Command | Preview mode |
 | --- | --- |
 | `clean` | `tuxcleaner clean --dry-run --yes` |
+| `uninstall` | `tuxcleaner uninstall --app pacman:firefox --dry-run --yes` |
 | `purge` | `tuxcleaner purge --dry-run --yes` |
 | `update` | `tuxcleaner update --dry-run` |
 
@@ -121,18 +132,22 @@ Additional protections include:
 - Large personal files are reported but never selected or deleted by `analyze`.
 - Hidden application data is listed separately with a warning.
 - Project artifacts are never selected by default.
+- Application discovery includes only explicitly installed native packages that own visible desktop entries, plus Flatpak applications.
+- An uninstall selection uses an exact source-qualified ID, such as `apt:firefox` or `flatpak-user:org.example.App`.
+- Native package managers must produce a removal preview before TuxCleaner asks for final confirmation.
+- Critical system packages are denied, and application configuration and user data are preserved.
 
 Read [SECURITY.md](SECURITY.md) for the complete trust boundaries.
 
 ## Distribution adapters
 
-| Family | Detected examples | Package cleanup |
-| --- | --- | --- |
-| Arch | Arch, Manjaro, EndeavourOS | `paccache -rk1`, then `paccache -ruk0` |
-| Debian | Debian, Ubuntu, Linux Mint, Pop!_OS | `apt-get clean` |
-| Fedora | Fedora, RHEL, CentOS, Rocky, AlmaLinux | `dnf clean all` |
+| Family | Detected examples | Package cleanup | Application uninstall |
+| --- | --- | --- | --- |
+| Arch | Arch, Manjaro, EndeavourOS | `paccache -rk1`, then `paccache -ruk0` | `pacman` and Flatpak |
+| Debian | Debian, Ubuntu, Linux Mint, Pop!_OS | `apt-get clean` | APT and Flatpak |
+| Fedora | Fedora, RHEL, CentOS, Rocky, AlmaLinux | `dnf clean all` | DNF and Flatpak |
 
-Unknown distributions still receive user-cache, developer-cache, analysis, purge, and status functionality. System package cleanup is skipped with a warning.
+Unknown distributions still receive Flatpak uninstall, user-cache, developer-cache, analysis, purge, and status functionality. Native package cleanup and uninstall are skipped with a warning.
 
 ## Architecture
 
@@ -142,11 +157,12 @@ The binary is intentionally split into small modules:
 CLI / Ratatui menu
         |
         +-- distribution adapter --> package cleanup actions
+        +-- application catalog --> explicit desktop apps
         +-- scanner -------------> allowlisted cache actions
         +-- analyzer ------------> read-only disk report
         +-- purge scanner --------> explicit project artifacts
         |
-        +-- safety executor ------> path and command validation
+        +-- safety executor ------> path, package, and command validation
                                       |
                                       +-- JSONL history
 ```
@@ -161,10 +177,13 @@ More design detail is available in [docs/architecture.md](docs/architecture.md).
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
+sh -n install.sh scripts/package-release.sh scripts/render-demo.sh docs/demo/fixtures/bin/*
 sh tests/install.sh
 ```
 
-Tests cover distribution fixtures, size parsing, traversal exclusions, symlink behavior, safety-policy rejection, history ordering, dry-run preservation, and JSON CLI contracts. CI also runs smoke tests in Arch, Ubuntu, and Fedora containers.
+Tests cover distribution fixtures, application catalog providers, protected-package rejection, exact uninstall commands, size parsing, traversal exclusions, symlink behavior, history ordering, dry-run preservation, and JSON CLI contracts. CI also runs smoke tests in Arch, Ubuntu, and Fedora containers.
+
+The README tour is recorded from `docs/tuxcleaner-demo.tape` with fictional fixtures. Regenerate it with `scripts/render-demo.sh`; this optional documentation task requires VHS, ttyd, ffmpeg, and JetBrains Mono.
 
 ## Credits and license
 
