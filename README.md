@@ -199,13 +199,13 @@ More design detail is available in [docs/architecture.md](docs/architecture.md).
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
-sh -n install.sh scripts/package-release.sh scripts/render-demo.sh docs/demo/fixtures/bin/*
+sh -n install.sh scripts/package-release.sh scripts/render-demo.sh scripts/render-social-preview.sh docs/demo/fixtures/bin/*
 sh tests/install.sh
 ```
 
 Tests cover distribution fixtures, application catalog providers, protected-package rejection, exact uninstall commands, size parsing, traversal exclusions, symlink behavior, history ordering, dry-run preservation, and JSON CLI contracts. CI also runs smoke tests in Arch, Ubuntu, and Fedora containers.
 
-The README tour is recorded from `docs/tuxcleaner-demo.tape` with fictional fixtures. Regenerate it with `scripts/render-demo.sh`; this optional documentation task requires VHS, ttyd, ffmpeg, ImageMagick, Adwaita Sans, and JetBrains Mono.
+The README tour is recorded from `docs/tuxcleaner-demo.tape` with fictional fixtures. Regenerate it with `scripts/render-demo.sh`; the same command extracts a real menu frame and rebuilds the GitHub social preview. This optional documentation task requires VHS, ttyd, ffmpeg, ImageMagick, Adwaita Sans, and JetBrains Mono.
 
 ## Credits and license
 

@@ -33,7 +33,10 @@ magick -background none docs/demo/adwaita-frame.svg "$demo_root/adwaita-frame.pn
 ffmpeg -loglevel error -y \
     -loop 1 -framerate 25 -i "$demo_root/adwaita-frame.png" \
     -i "$demo_root/raw.gif" \
-    -filter_complex '[0:v][1:v]overlay=24:80:shortest=1,split[frames][palette_source];[palette_source]palettegen=stats_mode=diff[palette];[frames][palette]paletteuse=dither=bayer:bayer_scale=3' \
+    -filter_complex '[0:v][1:v]overlay=40:96:shortest=1,split[frames][palette_source];[palette_source]palettegen=stats_mode=diff[palette];[frames][palette]paletteuse=dither=bayer:bayer_scale=3' \
     -shortest -loop 0 docs/tuxcleaner-demo.gif
+ffmpeg -loglevel error -y -ss 2.5 -i docs/tuxcleaner-demo.gif \
+    -vf 'crop=1200:776:40:40' -frames:v 1 docs/demo/tuxcleaner-menu.png
+scripts/render-social-preview.sh
 
 printf 'Rendered %s\n' "$project_root/docs/tuxcleaner-demo.gif"

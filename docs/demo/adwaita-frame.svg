@@ -1,27 +1,31 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1248" height="824" viewBox="0 0 1248 824">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="856" viewBox="0 0 1280 856">
   <defs>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
       <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#1c1c1c" flood-opacity="0.28"/>
     </filter>
+    <pattern id="desktop-pattern" width="64" height="64" patternUnits="userSpaceOnUse" patternTransform="rotate(-12)">
+      <rect width="64" height="64" fill="#d8dee9"/>
+      <rect x="5" y="8" width="28" height="9" rx="4.5" fill="#c1ccdc" opacity="0.72"/>
+      <rect x="37" y="40" width="22" height="9" rx="4.5" fill="#b9c6d8" opacity="0.58"/>
+      <circle cx="18" cy="45" r="5" fill="#e5e9f0" opacity="0.9"/>
+      <circle cx="52" cy="18" r="3" fill="#aebdd2" opacity="0.58"/>
+    </pattern>
   </defs>
 
-  <rect width="1248" height="824" fill="#d8dee9"/>
-  <rect x="24" y="24" width="1200" height="776" rx="16" fill="#1e1e1e" filter="url(#shadow)"/>
+  <rect width="1280" height="856" fill="url(#desktop-pattern)"/>
+  <rect x="40" y="40" width="1200" height="776" rx="16" fill="#1e1e1e" filter="url(#shadow)"/>
 
-  <path d="M40 24h1168a16 16 0 0 1 16 16v40H24V40a16 16 0 0 1 16-16z" fill="#ebebeb"/>
-  <path d="M24 80h1200" stroke="#c9c9c9"/>
+  <path d="M56 40h1168a16 16 0 0 1 16 16v40H40V56a16 16 0 0 1 16-16z" fill="#303030"/>
+  <path d="M40 96h1200" stroke="#1c1c1c"/>
 
-  <rect x="44" y="36" width="108" height="32" rx="16" fill="#3584e4"/>
-  <text x="98" y="57" text-anchor="middle" font-family="Adwaita Sans, sans-serif" font-size="13" font-weight="700" fill="#ffffff">DEMO DATA</text>
+  <text x="640" y="75" text-anchor="middle" font-family="Adwaita Sans, sans-serif" font-size="17" font-weight="700" fill="#f6f5f4">TuxCleaner - Feature tour</text>
 
-  <text x="624" y="59" text-anchor="middle" font-family="Adwaita Sans, sans-serif" font-size="17" font-weight="700" fill="#2e3436">TuxCleaner - Feature tour</text>
-
-  <g fill="#deddda">
-    <rect x="1082" y="35" width="34" height="34" rx="10"/>
-    <rect x="1124" y="35" width="34" height="34" rx="10"/>
-    <rect x="1166" y="35" width="34" height="34" rx="10"/>
+  <g fill="#454545">
+    <rect x="1098" y="51" width="34" height="34" rx="10"/>
+    <rect x="1140" y="51" width="34" height="34" rx="10"/>
+    <rect x="1182" y="51" width="34" height="34" rx="10"/>
   </g>
-  <path d="M1093 53h12" stroke="#5e5c64" stroke-width="2" stroke-linecap="round"/>
-  <rect x="1135" y="46" width="12" height="12" rx="2" fill="none" stroke="#5e5c64" stroke-width="2"/>
-  <path d="M1177 46l12 12m0-12-12 12" stroke="#5e5c64" stroke-width="2" stroke-linecap="round"/>
+  <path d="M1109 69h12" stroke="#deddda" stroke-width="2" stroke-linecap="round"/>
+  <rect x="1151" y="62" width="12" height="12" rx="2" fill="none" stroke="#deddda" stroke-width="2"/>
+  <path d="M1193 62l12 12m0-12-12 12" stroke="#deddda" stroke-width="2" stroke-linecap="round"/>
 </svg>

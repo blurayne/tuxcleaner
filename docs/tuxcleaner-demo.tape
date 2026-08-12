@@ -35,11 +35,15 @@ Enter
 Show
 
 Sleep 800ms
-Type "tuxcleaner --help"
+Type "tuxcleaner"
 Sleep 500ms
 Enter
-Wait+Screen /Options:/
-Sleep 2200ms
+Wait+Screen /Safety-first Linux maintenance/
+Sleep 1800ms
+Down
+Sleep 1400ms
+Type "q"
+Wait+Screen /demo@linux/
 
 Ctrl+L
 Type "tuxcleaner clean --groups user,dev --dry-run --yes"

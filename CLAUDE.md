@@ -12,7 +12,7 @@ Run these commands before considering a change complete:
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
-sh -n install.sh scripts/package-release.sh scripts/render-demo.sh docs/demo/fixtures/bin/*
+sh -n install.sh scripts/package-release.sh scripts/render-demo.sh scripts/render-social-preview.sh docs/demo/fixtures/bin/*
 sh tests/install.sh
 ```
 

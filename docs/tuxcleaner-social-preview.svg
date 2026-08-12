@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#eef1f6"/>
+      <stop offset="1" stop-color="#cbd5e4"/>
+    </linearGradient>
+    <pattern id="pattern" width="72" height="72" patternUnits="userSpaceOnUse" patternTransform="rotate(-12)">
+      <rect x="6" y="9" width="31" height="10" rx="5" fill="#afbdd2" opacity="0.42"/>
+      <rect x="42" y="45" width="24" height="10" rx="5" fill="#9fb0c9" opacity="0.34"/>
+      <circle cx="21" cy="51" r="5" fill="#ffffff" opacity="0.55"/>
+      <circle cx="59" cy="20" r="3" fill="#8ea2bf" opacity="0.38"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#1c1c1c" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#background)"/>
+  <rect width="1280" height="640" fill="url(#pattern)"/>
+  <circle cx="72" cy="604" r="235" fill="#3584e4" opacity="0.10"/>
+  <circle cx="1235" cy="42" r="170" fill="#9141ac" opacity="0.08"/>
+
+  <g transform="translate(70 66)">
+    <text x="2" y="24" font-family="Adwaita Sans, sans-serif" font-size="15" font-weight="800" letter-spacing="1.7" fill="#3584e4">SAFETY-FIRST LINUX MAINTENANCE</text>
+    <text x="0" y="112" font-family="Adwaita Sans, sans-serif" font-size="70" font-weight="800" fill="#202124">TuxCleaner</text>
+    <text x="2" y="158" font-family="Adwaita Sans, sans-serif" font-size="26" font-weight="650" fill="#3d434d">Linux maintenance, without surprises.</text>
+    <text x="2" y="201" font-family="Adwaita Sans, sans-serif" font-size="18" fill="#5e6570">Clean caches, analyze disks, uninstall desktop apps,</text>
+    <text x="2" y="229" font-family="Adwaita Sans, sans-serif" font-size="18" fill="#5e6570">and install verified updates from one Rust CLI.</text>
+
+    <g transform="translate(0 268)" font-family="Adwaita Sans, sans-serif" font-size="14" font-weight="750">
+      <rect width="106" height="36" rx="18" fill="#ffffff" opacity="0.90"/>
+      <text x="53" y="24" text-anchor="middle" fill="#2e3436">RUST CLI</text>
+      <rect x="118" width="126" height="36" rx="18" fill="#ffffff" opacity="0.90"/>
+      <text x="181" y="24" text-anchor="middle" fill="#2e3436">DRY-RUN</text>
+      <rect x="256" width="185" height="36" rx="18" fill="#ffffff" opacity="0.90"/>
+      <text x="348.5" y="24" text-anchor="middle" fill="#2e3436">PACMAN · APT · DNF</text>
+    </g>
+
+    <rect x="0" y="338" width="548" height="94" rx="13" fill="#ffffff" opacity="0.86"/>
+    <circle cx="22" cy="363" r="5" fill="#33d17a"/>
+    <text x="38" y="368" font-family="JetBrains Mono, monospace" font-size="13" fill="#3584e4">curl --proto '=https' --tlsv1.2 -LsSf \</text>
+    <text x="20" y="398" font-family="JetBrains Mono, monospace" font-size="13" fill="#3584e4">https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh | sh</text>
+    <text x="2" y="484" font-family="Adwaita Sans, sans-serif" font-size="16" font-weight="750" fill="#5e6570">github.com/debba/tuxcleaner</text>
+  </g>
+
+  <rect x="664" y="97" width="568" height="367" rx="15" fill="#1e1e1e" filter="url(#shadow)"/>
+</svg>
