@@ -38,10 +38,10 @@
 
     <rect x="0" y="338" width="548" height="94" rx="13" fill="#ffffff" opacity="0.86"/>
     <circle cx="22" cy="363" r="5" fill="#33d17a"/>
-    <text x="38" y="368" font-family="JetBrains Mono, monospace" font-size="13" fill="#3584e4">curl --proto '=https' --tlsv1.2 -LsSf \</text>
+    <text x="38" y="368" font-family="JetBrains Mono, monospace" font-size="13" fill="#3584e4">curl -LsSf \</text>
     <text x="20" y="398" font-family="JetBrains Mono, monospace" font-size="13" fill="#3584e4">https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh | sh</text>
     <text x="2" y="484" font-family="Adwaita Sans, sans-serif" font-size="16" font-weight="750" fill="#5e6570">github.com/debba/tuxcleaner</text>
   </g>
 
-  <rect x="664" y="97" width="568" height="367" rx="15" fill="#1e1e1e" filter="url(#shadow)"/>
+  <rect x="664" y="136" width="568" height="367" rx="15" fill="#1e1e1e" filter="url(#shadow)"/>
 </svg>

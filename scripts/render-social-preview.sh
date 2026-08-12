@@ -14,7 +14,7 @@ cd "$project_root"
 magick -background none docs/tuxcleaner-social-preview.svg "$work_dir/background.png"
 magick "$work_dir/background.png" \
     \( docs/demo/tuxcleaner-menu.png -resize '568x367!' \) \
-    -geometry +664+97 -compose over -composite \
+    -geometry +664+136 -compose over -composite \
     docs/tuxcleaner-social-preview.png
 
 printf 'Rendered %s\n' "$project_root/docs/tuxcleaner-social-preview.png"

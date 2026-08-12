@@ -29,7 +29,7 @@ The [VHS tour](docs/tuxcleaner-demo.tape) runs the compiled CLI against isolated
 Install the latest prebuilt release with one command:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh | sh
 ```
 
 The installer detects x86_64 or ARM64 and GNU libc or musl, downloads the matching GitHub Release archive, verifies its SHA-256 checksum, and installs `tuxcleaner`. It prefers `~/.local/bin` and uses `/usr/local/bin` when that directory is writable.
@@ -37,14 +37,14 @@ The installer detects x86_64 or ARM64 and GNU libc or musl, downloads the matchi
 Install a specific version or directory:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh \
+curl -LsSf https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh \
   | TUXCLEANER_VERSION=0.2.0 TUXCLEANER_INSTALL_DIR="$HOME/bin" sh
 ```
 
 To inspect the installer before running it:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh -o install.sh
+curl -LsSf https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh -o install.sh
 less install.sh
 sh install.sh
 ```
