@@ -14,15 +14,15 @@ The split supports three goals:
 
 | Module | Responsibility |
 | --- | --- |
-| `cli` | Clap interface, confirmations, rendering, and command orchestration |
-| `tui` | Persistent Ratatui navigation, asynchronous loading, selection, and confirmation for every menu workflow |
+| `cli` | Clap interface and command routing, split into workflow-specific modules for arguments, operations, output, and shared support |
+| `tui` | Persistent Ratatui navigation with separate state/event-loop, rendering, and workflow-execution modules |
 | `distro` | `os-release` parsing and package-manager actions |
 | `uninstall` | Visible desktop application discovery, package ownership, and protected-package policy |
 | `scanner` | Known system, user, developer, Docker, and Flatpak candidates |
 | `analyze` | Read-only disk aggregation and explicit large-file candidates |
 | `purge` | Discovery of old reproducible project artifacts |
 | `executor` | Exact path and command validation, removal, and process execution |
-| `history` | Append-only JSONL operation records |
+| `history` | Lock-serialized JSONL operation records with bounded rotation and tolerant reads |
 | `status` | Read-only Linux health information from `/proc` and `df` |
 | `update` | GitHub release discovery, SHA-256 verification, and atomic self-replacement |
 
@@ -64,5 +64,7 @@ Ratatui never collects a sudo password. Before an operation containing a root co
 ## Machine-readable interfaces
 
 The JSON structures are regular Serde models. Fields are additive within the `0.x` series. Automation should ignore unknown fields and must pass `--yes` to request destructive cleanup. Without `--yes`, `clean --json` and `uninstall --json` return inventory only. Large-file automation additionally requires one or more exact `--file` paths from the current analysis.
+
+History writers coordinate through a separate advisory lock so rotation cannot invalidate the synchronization point. The active file rotates at 5 MiB and retains three older files. Readers hold a shared lock, preserve newest-first ordering across rotations, and skip individual malformed JSONL records. History and lock files use owner-only permissions.
 
 The updater selects an exact target archive from GitHub release metadata, downloads its adjacent SHA-256 asset, verifies the complete archive, extracts only the `tuxcleaner` entry, and atomically replaces the current executable. `update --check` and `update --dry-run` stop before downloading or replacing the binary.

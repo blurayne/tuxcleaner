@@ -21,7 +21,7 @@ The [VHS tour](docs/tuxcleaner-demo.tape) runs the compiled CLI against isolated
 - Old project artifact discovery for `node_modules`, `target`, `build`, `dist`, `.build`, and `.venv`
 - Read-only CPU, memory, disk, load, and uptime status
 - JSON output for automation
-- Dry-run support and JSONL operation history
+- Dry-run support and lock-serialized, size-bounded JSONL operation history
 - Checksum-verified self-updates from GitHub Releases
 
 ## Install
@@ -38,7 +38,7 @@ Install a specific version or directory:
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh \
-| TUXCLEANER_VERSION=0.4.0 TUXCLEANER_INSTALL_DIR="$HOME/bin" sh
+| TUXCLEANER_VERSION=0.5.0 TUXCLEANER_INSTALL_DIR="$HOME/bin" sh
 ```
 
 To inspect the installer before running it:
@@ -118,7 +118,7 @@ tuxcleaner history --json
 tuxcleaner update --check
 tuxcleaner update --dry-run
 tuxcleaner update --yes
-tuxcleaner update --version 0.4.0 --yes
+tuxcleaner update --version 0.5.0 --yes
 ```
 
 Self-update requires write access to the directory containing the running binary. If TuxCleaner is launched inside a read-only filesystem sandbox, run the update from a regular terminal or reinstall it into a writable directory such as `~/.local/bin`.
@@ -136,6 +136,8 @@ Every command that can change the machine supports a dry run:
 | `update` | `tuxcleaner update --dry-run` |
 
 The `tuxcleaner analyze` subcommand is read-only unless `--remove` is explicitly passed. The interactive Analyze explorer can permanently remove explicitly selected files after confirmation. `status`, `history`, and `update --check` are always read-only.
+
+Operation history is stored with owner-only permissions. Concurrent TuxCleaner processes serialize access through a separate lock file. The active JSONL file rotates at 5 MiB, keeps three older files, and ignores isolated malformed records when reading so one interrupted write cannot hide otherwise valid history.
 
 ## Safety model
 

@@ -38,6 +38,10 @@ Package cache, native application uninstall, and journal cleanup use `sudo -- <p
 
 Do not run the complete TuxCleaner process as root. Use the normal user account and allow the narrow `sudo` commands after reviewing the selected system group.
 
+## History privacy and integrity
+
+Operation history can contain local paths and package names. TuxCleaner creates its JSONL history and advisory lock files with owner-only permissions (`0600`). Existing history files are tightened to the same mode when opened. Concurrent readers and writers use the lock file, and bounded rotation occurs while holding an exclusive lock. Readers skip isolated malformed records rather than making the complete history unavailable.
+
 ## Reporting a vulnerability
 
 Please open a private security advisory in the project repository. Include the affected version, exact command, distribution, expected safety boundary, and a minimal reproduction. Do not include personal file paths, credentials, or command history containing sensitive data.
