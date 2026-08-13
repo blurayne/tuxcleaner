@@ -19,7 +19,7 @@ The split supports three goals:
 | `distro` | `os-release` parsing and package-manager actions |
 | `uninstall` | Visible desktop application discovery, package ownership, and protected-package policy |
 | `scanner` | Known system, user, developer, Docker, and Flatpak candidates |
-| `analyze` | Read-only disk aggregation and large-file reporting |
+| `analyze` | Read-only disk aggregation and explicit large-file candidates |
 | `purge` | Discovery of old reproducible project artifacts |
 | `executor` | Exact path and command validation, removal, and process execution |
 | `history` | Append-only JSONL operation records |
@@ -53,8 +53,10 @@ All traversals disable symlink following. Before deletion, the executor walks ev
 
 Deletion uses `remove_file` and `remove_dir_all` on exact `Path` values. No user path is interpolated into a shell command.
 
+Large personal-file removal has a separate executor action and validator. It accepts only exact regular files in non-hidden paths under the canonical home directory. Candidates must come from the current size-threshold analysis, and hidden application data remains report-only.
+
 ## Machine-readable interfaces
 
-The JSON structures are regular Serde models. Fields are additive within the `0.x` series. Automation should ignore unknown fields and must pass `--yes` to request destructive cleanup. Without `--yes`, `clean --json` and `uninstall --json` return inventory only.
+The JSON structures are regular Serde models. Fields are additive within the `0.x` series. Automation should ignore unknown fields and must pass `--yes` to request destructive cleanup. Without `--yes`, `clean --json` and `uninstall --json` return inventory only. Large-file automation additionally requires one or more exact `--file` paths from the current analysis.
 
 The updater selects an exact target archive from GitHub release metadata, downloads its adjacent SHA-256 asset, verifies the complete archive, extracts only the `tuxcleaner` entry, and atomically replaces the current executable. `update --check` and `update --dry-run` stop before downloading or replacing the binary.

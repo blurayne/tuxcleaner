@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
@@ -58,6 +58,8 @@ pub fn install(requested_version: Option<&str>) -> Result<UpdateResult> {
         });
     }
 
+    let current_executable = ensure_update_target_writable()?;
+
     let archive_name = format!("tuxcleaner-{}.tar.gz", info.target);
     let checksum_name = format!("{archive_name}.sha256");
     let archive_url = asset_url(&release, &archive_name)?;
@@ -74,10 +76,8 @@ pub fn install(requested_version: Option<&str>) -> Result<UpdateResult> {
     }
     self_replace::self_replace(&new_binary).with_context(|| {
         format!(
-            "failed to replace the current executable; check permissions for {}",
-            std::env::current_exe()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| "the install directory".into())
+            "failed to replace {}; the install directory may have become read-only or lost write permission",
+            current_executable.display()
         )
     })?;
 
@@ -87,6 +87,33 @@ pub fn install(requested_version: Option<&str>) -> Result<UpdateResult> {
         target: info.target,
         updated: true,
     })
+}
+
+fn ensure_update_target_writable() -> Result<PathBuf> {
+    let executable = std::env::current_exe()
+        .context("failed to determine the current executable before updating")?;
+    verify_update_target_writable(&executable)?;
+    Ok(executable)
+}
+
+fn verify_update_target_writable(executable: &Path) -> Result<()> {
+    let directory = executable.parent().with_context(|| {
+        format!(
+            "cannot determine the install directory for {}",
+            executable.display()
+        )
+    })?;
+    tempfile::Builder::new()
+        .prefix(".tuxcleaner-update-check-")
+        .tempfile_in(directory)
+        .with_context(|| {
+            format!(
+                "cannot update {} because its install directory {} is not writable; run TuxCleaner outside a read-only sandbox or reinstall it into a writable directory",
+                executable.display(),
+                directory.display()
+            )
+        })?;
+    Ok(())
 }
 
 fn fetch_release(requested_version: Option<&str>) -> Result<GitHubRelease> {
@@ -214,7 +241,7 @@ mod tests {
 
     #[test]
     fn normalizes_release_versions() {
-        assert_eq!(normalize_tag("0.2.0").unwrap(), "v0.2.0");
+        assert_eq!(normalize_tag("0.3.0").unwrap(), "v0.3.0");
         assert_eq!(normalize_tag("v1.0.0-beta.1").unwrap(), "v1.0.0-beta.1");
         assert!(normalize_tag("latest").is_err());
     }
@@ -241,5 +268,31 @@ mod tests {
             "https://example.invalid/wanted"
         );
         assert!(asset_url(&release, "other.tar.gz").is_err());
+    }
+
+    #[test]
+    fn writable_update_target_preflight_accepts_the_test_binary() {
+        let executable = ensure_update_target_writable().unwrap();
+        assert!(executable.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_target_preflight_explains_a_non_writable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("bin");
+        let executable = directory.join("tuxcleaner");
+        fs::create_dir(&directory).unwrap();
+        fs::write(&executable, b"binary").unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let error = verify_update_target_writable(&executable).unwrap_err();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("is not writable"));
+        assert!(message.contains("read-only sandbox"));
     }
 }

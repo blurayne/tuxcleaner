@@ -47,6 +47,9 @@ pub enum CleanupAction {
         path: PathBuf,
         contents_only: bool,
     },
+    RemovePersonalFile {
+        path: PathBuf,
+    },
     Command {
         program: String,
         args: Vec<String>,

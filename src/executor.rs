@@ -87,6 +87,16 @@ impl<R: CommandRunner> Executor<R> {
                     }
                 })
                 .map_err(|error| error.to_string()),
+            CleanupAction::RemovePersonalFile { path } => self
+                .validate_personal_file(path)
+                .and_then(|()| {
+                    if dry_run || !path.exists() {
+                        Ok(())
+                    } else {
+                        remove_entry(path)
+                    }
+                })
+                .map_err(|error| error.to_string()),
             CleanupAction::Command {
                 program,
                 args,
@@ -268,6 +278,37 @@ impl<R: CommandRunner> Executor<R> {
             return Err(ExecutionError::UnsafePath(path.to_path_buf()));
         }
         self.ensure_no_symlink_ancestors(path)?;
+        Ok(())
+    }
+
+    pub fn validate_personal_file(&self, path: &Path) -> Result<(), ExecutionError> {
+        if !path.is_absolute()
+            || path == Path::new("/")
+            || path == self.home
+            || !path.starts_with(&self.home)
+            || path
+                .components()
+                .any(|component| component == Component::ParentDir)
+        {
+            return Err(ExecutionError::UnsafePath(path.to_path_buf()));
+        }
+        let relative = path
+            .strip_prefix(&self.home)
+            .map_err(|_| ExecutionError::UnsafePath(path.to_path_buf()))?;
+        if relative.components().any(|component| {
+            matches!(component, Component::Normal(name) if name.to_string_lossy().starts_with('.'))
+        }) || relative.starts_with("go/pkg")
+        {
+            return Err(ExecutionError::UnsafePath(path.to_path_buf()));
+        }
+        self.ensure_no_symlink_ancestors(path)?;
+        let metadata = fs::symlink_metadata(path).map_err(|source| ExecutionError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ExecutionError::UnsafePath(path.to_path_buf()));
+        }
         Ok(())
     }
 
@@ -596,6 +637,39 @@ mod tests {
         let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
         assert!(executor.execute(&item(target.clone()), true).success);
         assert!(target.exists());
+    }
+
+    #[test]
+    fn removes_an_exact_personal_file() {
+        let root = tempdir().unwrap();
+        let file = root.path().join("Downloads/archive.iso");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"data").unwrap();
+        let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
+        let item = CleanupItem {
+            id: "large-file:test".into(),
+            group: CleanupGroup::User,
+            label: "archive.iso".into(),
+            estimated_bytes: 4,
+            risk: Risk::Explicit,
+            action: CleanupAction::RemovePersonalFile { path: file.clone() },
+        };
+
+        let result = executor.execute(&item, false);
+        assert!(result.success, "{}", result.message);
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn rejects_hidden_application_data_as_a_personal_file() {
+        let root = tempdir().unwrap();
+        let file = root.path().join(".models/model.bin");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"data").unwrap();
+        let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
+
+        assert!(executor.validate_personal_file(&file).is_err());
+        assert!(file.exists());
     }
 
     fn application(package: &str) -> Application {

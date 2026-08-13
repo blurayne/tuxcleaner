@@ -10,19 +10,21 @@ Only the latest release is supported while the project is in its initial develop
 
 TuxCleaner does not accept arbitrary cleanup commands. System actions are built by distribution adapters and must match an exact executable, argument list, and privilege requirement in the executor.
 
-Filesystem removal is limited to known cache paths under the current user's canonical home directory and exact project artifact directory names discovered by the purge scanner. The executor rejects:
+Filesystem removal is limited to known cache paths, individually selected large personal files, and exact project artifact directory names under the current user's canonical home directory. The executor rejects:
 
 - root and the home directory itself
 - relative paths and parent traversal
 - anything outside the home directory
 - `.git` at any path depth
 - `.config`, `.ssh`, and `.gnupg`
-- unknown directory names
+- unknown directory names for cache and project cleanup
+- personal-file paths containing hidden components or known developer-cache prefixes
+- personal-file targets that are not regular files
 - cleanup targets or ancestors that are symbolic links
 
 Docker cleanup uses `docker system prune -f` without `--volumes`. TuxCleaner does not enumerate or remove Docker volumes.
 
-Large personal files found by `analyze` are read-only results. The command offers no deletion mode.
+Large personal files found by `analyze` remain read-only unless `--remove` is passed. Interactive removal starts with an empty per-file selection and requires a final confirmation. Non-interactive removal requires both `--yes` and exact `--file` paths that appear in the current analysis. Hidden application data is never eligible.
 
 ## Application uninstall trust boundary
 

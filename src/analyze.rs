@@ -7,6 +7,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use walkdir::{DirEntry, WalkDir};
 
+use crate::model::{CleanupAction, CleanupGroup, CleanupItem, Risk};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskEntry {
     pub name: String,
@@ -21,6 +23,21 @@ pub struct LargeFile {
     pub size: u64,
     pub modified_unix: Option<u64>,
     pub app_data: bool,
+}
+
+impl LargeFile {
+    pub fn cleanup_item(&self) -> CleanupItem {
+        CleanupItem {
+            id: format!("large-file:{}", self.path.display()),
+            group: CleanupGroup::User,
+            label: format!("Large personal file {}", self.path.display()),
+            estimated_bytes: self.size,
+            risk: Risk::Explicit,
+            action: CleanupAction::RemovePersonalFile {
+                path: self.path.clone(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,7 +104,7 @@ pub fn analyze(root: &Path, minimum_size: u64, max_depth: usize) -> Result<Analy
             bucket.0 = bucket.0.saturating_add(size);
             total_size = total_size.saturating_add(size);
             total_files += 1;
-            if size >= minimum_size {
+            if size >= minimum_size && !is_excluded_large_file(relative) {
                 let modified_unix = metadata
                     .modified()
                     .ok()
@@ -144,6 +161,20 @@ fn is_hidden_component(component: Component<'_>) -> bool {
     }
 }
 
+fn is_excluded_large_file(relative: &Path) -> bool {
+    [
+        Path::new(".cache"),
+        Path::new(".local/share/Trash"),
+        Path::new(".cargo"),
+        Path::new(".npm"),
+        Path::new("go/pkg"),
+        Path::new(".local/share/flatpak"),
+        Path::new(".local/share/docker"),
+    ]
+    .iter()
+    .any(|excluded| relative.starts_with(excluded))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +208,24 @@ mod tests {
         fs::write(root.path().join("project/source.rs"), vec![0; 10]).unwrap();
         let report = analyze(root.path(), 1, 10).unwrap();
         assert_eq!(report.total_size, 10);
+    }
+
+    #[test]
+    fn excludes_known_cache_trees_from_large_file_candidates() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".cache/browser")).unwrap();
+        fs::create_dir_all(root.path().join("go/pkg/mod")).unwrap();
+        fs::create_dir_all(root.path().join("Downloads")).unwrap();
+        fs::write(root.path().join(".cache/browser/cache.bin"), vec![0; 100]).unwrap();
+        fs::write(root.path().join("go/pkg/mod/archive.bin"), vec![0; 100]).unwrap();
+        fs::write(root.path().join("Downloads/archive.bin"), vec![0; 100]).unwrap();
+
+        let report = analyze(root.path(), 50, 10).unwrap();
+        assert_eq!(report.total_size, 300);
+        assert_eq!(report.large_files.len(), 1);
+        assert_eq!(
+            report.large_files[0].path,
+            root.path().join("Downloads/archive.bin")
+        );
     }
 }

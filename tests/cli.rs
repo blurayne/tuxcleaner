@@ -139,6 +139,59 @@ fn analyze_json_is_machine_readable_and_read_only() {
 }
 
 #[test]
+fn analyze_remove_deletes_only_an_exact_selected_large_file() {
+    let home = tempdir().unwrap();
+    let state = tempdir().unwrap();
+    let os_release = home.path().join("os-release");
+    let selected = home.path().join("Downloads/selected.bin");
+    let preserved = home.path().join("Downloads/preserved.bin");
+    fs::create_dir_all(selected.parent().unwrap()).unwrap();
+    fs::write(&os_release, "NAME=Test Linux\nID=test\n").unwrap();
+    fs::write(&selected, vec![0; 128]).unwrap();
+    fs::write(&preserved, vec![0; 128]).unwrap();
+
+    let output = command()
+        .args([
+            "analyze",
+            "--min-size",
+            "100",
+            "--remove",
+            "--file",
+            selected.to_str().unwrap(),
+            "--yes",
+            "--json",
+        ])
+        .env("HOME", home.path())
+        .env("XDG_STATE_HOME", state.path())
+        .env("TUXCLEANER_OS_RELEASE", os_release)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["results"].as_array().unwrap().len(), 1);
+    assert!(!selected.exists());
+    assert!(preserved.exists());
+}
+
+#[test]
+fn analyze_remove_yes_requires_an_exact_file() {
+    let home = tempdir().unwrap();
+
+    command()
+        .args(["analyze", "--remove", "--yes"])
+        .env("HOME", home.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "requires at least one exact --file",
+        ));
+}
+
+#[test]
 fn clean_json_without_yes_only_reports_candidates() {
     let home = tempdir().unwrap();
     let os_release = home.path().join("os-release");

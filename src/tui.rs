@@ -39,7 +39,7 @@ const MENU: &[(MenuAction, &str, &str)] = &[
     (
         MenuAction::Analyze,
         "Analyze",
-        "Inspect disk usage and list large files safely",
+        "Inspect disk usage and optionally remove selected large files",
     ),
     (
         MenuAction::Purge,

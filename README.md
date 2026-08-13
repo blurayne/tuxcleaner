@@ -17,7 +17,7 @@ The [VHS tour](docs/tuxcleaner-demo.tape) runs the compiled CLI against isolated
 - Known user, browser, and developer cache scanning
 - Docker cleanup that never includes volumes
 - Unused Flatpak runtime cleanup
-- Read-only disk analysis with large personal files separated from hidden application data
+- Disk analysis with individually selectable large personal files, separated from hidden application data
 - Old project artifact discovery for `node_modules`, `target`, `build`, `dist`, `.build`, and `.venv`
 - Read-only CPU, memory, disk, load, and uptime status
 - JSON output for automation
@@ -38,7 +38,7 @@ Install a specific version or directory:
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh \
-  | TUXCLEANER_VERSION=0.2.0 TUXCLEANER_INSTALL_DIR="$HOME/bin" sh
+  | TUXCLEANER_VERSION=0.3.0 TUXCLEANER_INSTALL_DIR="$HOME/bin" sh
 ```
 
 To inspect the installer before running it:
@@ -82,6 +82,8 @@ tuxcleaner uninstall --app pacman:firefox --dry-run --yes
 tuxcleaner analyze
 tuxcleaner analyze ~/Downloads --min-size 1GiB
 tuxcleaner analyze --json
+tuxcleaner analyze --remove
+tuxcleaner analyze --min-size 1GiB --remove --file ~/Downloads/archive.iso --yes
 
 tuxcleaner purge
 tuxcleaner purge --path ~/Projects --older-than-days 30 --dry-run --yes
@@ -95,8 +97,10 @@ tuxcleaner history --json
 tuxcleaner update --check
 tuxcleaner update --dry-run
 tuxcleaner update --yes
-tuxcleaner update --version 0.2.0 --yes
+tuxcleaner update --version 0.3.0 --yes
 ```
+
+Self-update requires write access to the directory containing the running binary. If TuxCleaner is launched inside a read-only filesystem sandbox, run the update from a regular terminal or reinstall it into a writable directory such as `~/.local/bin`.
 
 `clean --json` without `--yes` is scan-only. This makes it safe to use for inventory scripts. Add `--yes` only when an automation is intended to execute every requested group.
 
@@ -106,10 +110,11 @@ Every command that can change the machine supports a dry run:
 | --- | --- |
 | `clean` | `tuxcleaner clean --dry-run --yes` |
 | `uninstall` | `tuxcleaner uninstall --app pacman:firefox --dry-run --yes` |
+| `analyze --remove` | `tuxcleaner analyze --remove --file ~/Downloads/archive.iso --dry-run --yes` |
 | `purge` | `tuxcleaner purge --dry-run --yes` |
 | `update` | `tuxcleaner update --dry-run` |
 
-`analyze`, `status`, `history`, and `update --check` are always read-only.
+`analyze` is read-only unless `--remove` is explicitly passed. `status`, `history`, and `update --check` are always read-only.
 
 ## Safety model
 
@@ -127,6 +132,7 @@ Every destructive workflow follows the same boundary:
 | --- | --- | --- | --- |
 | `clean` | Known cache paths and fixed maintenance actions | Interactive group selection or `--yes` | Exact path and command allowlists |
 | `uninstall` | Explicitly installed desktop applications and Flatpaks | Interactive application selection or exact `--app` IDs with `--yes` | Package identifier validation, protected-package refusal, and a transaction preview |
+| `analyze --remove` | Large personal files in the current user's home | Interactive per-file selection or exact `--file` paths with `--yes` | Exact regular files inside non-hidden home paths |
 | `purge` | Reproducible project artifacts with known directory names | Interactive artifact selection or `--yes` | Exact in-home paths, no symlinks, and no `.git` traversal |
 | `update` | Exact GitHub Release asset for the current Linux target | Interactive confirmation or `--yes` | SHA-256 verification followed by atomic binary replacement |
 
@@ -151,8 +157,8 @@ Additional protections include:
 - Pacman keeps one cached version of installed packages and removes cached packages that are no longer installed.
 - The systemd journal is reduced only when it exceeds 200 MiB.
 - Docker volumes are never passed to a cleanup command.
-- Large personal files are reported but never selected or deleted by `analyze`.
-- Hidden application data is listed separately with a warning.
+- Large personal files are never selected by default and receive a final confirmation before deletion.
+- Hidden application data is listed separately with a warning and cannot be selected for deletion.
 - Project artifacts are never selected by default.
 - Application discovery includes only explicitly installed native packages that own visible desktop entries, plus Flatpak applications.
 - An uninstall selection uses an exact source-qualified ID, such as `apt:firefox` or `flatpak-user:org.example.App`.
@@ -181,7 +187,7 @@ CLI / Ratatui menu
         +-- distribution adapter --> package cleanup actions
         +-- application catalog --> explicit desktop apps
         +-- scanner -------------> allowlisted cache actions
-        +-- analyzer ------------> read-only disk report
+        +-- analyzer ------------> disk report and explicit large-file candidates
         +-- purge scanner --------> explicit project artifacts
         |
         +-- safety executor ------> path, package, and command validation
