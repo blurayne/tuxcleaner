@@ -10,7 +10,7 @@ The [VHS tour](docs/tuxcleaner-demo.tape) runs the compiled CLI against isolated
 
 ## Features
 
-- Interactive terminal menu built with Ratatui
+- Persistent Ratatui interface with back navigation and an interactive disk explorer
 - Distribution detection through `/etc/os-release`
 - Package cleanup adapters for `pacman`, `apt`, and `dnf`
 - Explicit desktop application discovery and uninstall for `pacman`, APT, DNF, and Flatpak
@@ -38,7 +38,7 @@ Install a specific version or directory:
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/debba/tuxcleaner/main/install.sh \
-  | TUXCLEANER_VERSION=0.3.0 TUXCLEANER_INSTALL_DIR="$HOME/bin" sh
+| TUXCLEANER_VERSION=0.4.0 TUXCLEANER_INSTALL_DIR="$HOME/bin" sh
 ```
 
 To inspect the installer before running it:
@@ -65,6 +65,27 @@ cargo install --path .
 ```
 
 Run `tuxcleaner` without arguments to open the interactive menu.
+
+### Interactive disk explorer
+
+Open `Analyze` from the Ratatui menu to browse directories without leaving TuxCleaner. The explorer uses a 500 MB large-file threshold and keeps hidden application data read-only.
+
+| Key | Action |
+| --- | --- |
+| `Enter` or `→` | Open the selected directory |
+| `Esc` or `←` | Return to the previous directory or the main menu |
+| `Space` | Select an eligible large personal file |
+| `d`, `Delete`, or `Backspace` | Review the selected files before permanent removal |
+| `/` | Filter the current list |
+| `t` | Toggle the largest-files view |
+| `r` | Refresh the current location |
+| `?` | Show the complete shortcut reference |
+
+The confirmation dialog shows the exact file or selection count and total size, and states that removal is permanent. Interactive removals are recorded in history.
+
+Every main-menu action opens its Ratatui screen immediately and performs discovery in the background. Clean, Uninstall, and Purge support in-app selection and confirmation; Uninstall also shows the package-manager removal plan before execution. Status, History, and Update render their results in the same persistent interface. Use `Esc` to return to the main menu.
+
+When a selected operation needs administrator privileges, TuxCleaner temporarily leaves the alternate screen and runs `sudo -v` in the normal terminal. The password prompt is therefore visible and terminal echo behaves normally: password characters are intentionally not displayed. After authorization, TuxCleaner restores Ratatui and runs elevated commands with non-interactive sudo so a second hidden password prompt cannot block the interface.
 
 ## Commands
 
@@ -97,7 +118,7 @@ tuxcleaner history --json
 tuxcleaner update --check
 tuxcleaner update --dry-run
 tuxcleaner update --yes
-tuxcleaner update --version 0.3.0 --yes
+tuxcleaner update --version 0.4.0 --yes
 ```
 
 Self-update requires write access to the directory containing the running binary. If TuxCleaner is launched inside a read-only filesystem sandbox, run the update from a regular terminal or reinstall it into a writable directory such as `~/.local/bin`.
@@ -114,7 +135,7 @@ Every command that can change the machine supports a dry run:
 | `purge` | `tuxcleaner purge --dry-run --yes` |
 | `update` | `tuxcleaner update --dry-run` |
 
-`analyze` is read-only unless `--remove` is explicitly passed. `status`, `history`, and `update --check` are always read-only.
+The `tuxcleaner analyze` subcommand is read-only unless `--remove` is explicitly passed. The interactive Analyze explorer can permanently remove explicitly selected files after confirmation. `status`, `history`, and `update --check` are always read-only.
 
 ## Safety model
 
@@ -132,7 +153,8 @@ Every destructive workflow follows the same boundary:
 | --- | --- | --- | --- |
 | `clean` | Known cache paths and fixed maintenance actions | Interactive group selection or `--yes` | Exact path and command allowlists |
 | `uninstall` | Explicitly installed desktop applications and Flatpaks | Interactive application selection or exact `--app` IDs with `--yes` | Package identifier validation, protected-package refusal, and a transaction preview |
-| `analyze --remove` | Large personal files in the current user's home | Interactive per-file selection or exact `--file` paths with `--yes` | Exact regular files inside non-hidden home paths |
+| Interactive Analyze | Large personal files in the current user's home | Per-file selection and an in-app permanent-removal confirmation | Exact regular files inside non-hidden home paths |
+| `analyze --remove` | Large personal files in the current user's home | Interactive per-file selection or exact `--file` paths with `--yes` | Exact regular files inside non-hidden home paths, permanently removed |
 | `purge` | Reproducible project artifacts with known directory names | Interactive artifact selection or `--yes` | Exact in-home paths, no symlinks, and no `.git` traversal |
 | `update` | Exact GitHub Release asset for the current Linux target | Interactive confirmation or `--yes` | SHA-256 verification followed by atomic binary replacement |
 

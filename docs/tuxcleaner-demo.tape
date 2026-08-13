@@ -39,9 +39,22 @@ Type "tuxcleaner"
 Sleep 500ms
 Enter
 Wait+Screen /Safety-first Linux maintenance/
-Sleep 1800ms
 Down
+Down
+Enter
+Wait+Screen /TuxCleaner › Analyze/
+Sleep 1200ms
+Enter
+Wait+Screen /demo-archive.iso/
+Space
+Sleep 500ms
+Type "d"
+Wait+Screen /Permanently remove?/
 Sleep 1400ms
+Escape
+Escape
+Escape
+Sleep 500ms
 Type "q"
 Wait+Screen /demo@linux/
 

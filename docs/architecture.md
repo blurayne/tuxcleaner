@@ -15,7 +15,7 @@ The split supports three goals:
 | Module | Responsibility |
 | --- | --- |
 | `cli` | Clap interface, confirmations, rendering, and command orchestration |
-| `tui` | Ratatui interactive entry menu |
+| `tui` | Persistent Ratatui navigation, asynchronous loading, selection, and confirmation for every menu workflow |
 | `distro` | `os-release` parsing and package-manager actions |
 | `uninstall` | Visible desktop application discovery, package ownership, and protected-package policy |
 | `scanner` | Known system, user, developer, Docker, and Flatpak candidates |
@@ -51,9 +51,15 @@ Application uninstall is separate from cleanup adapters. The catalog includes ex
 
 All traversals disable symlink following. Before deletion, the executor walks every target component with `symlink_metadata` and refuses symlinks again. This second check limits both scanner mistakes and time-of-check/time-of-use surprises involving known cache paths.
 
-Deletion uses `remove_file` and `remove_dir_all` on exact `Path` values. No user path is interpolated into a shell command.
+Known cleanup targets and explicit CLI removal use `remove_file` and `remove_dir_all` on exact `Path` values. No user path is interpolated into a shell command.
 
 Large personal-file removal has a separate executor action and validator. It accepts only exact regular files in non-hidden paths under the canonical home directory. Candidates must come from the current size-threshold analysis, and hidden application data remains report-only.
+
+The interactive Analyze explorer uses the same permanent-removal action and independent path validation as `analyze --remove`. Ratatui adds per-file selection and a final confirmation, but does not bypass the executor boundary.
+
+All Ratatui screens render before starting potentially slow discovery. Filesystem scans, application discovery, system collection, history loading, and update checks communicate results back through channels while the event loop continues drawing. Analyze additionally carries a cancellation token because traversal can be long-running. Destructive operations keep the user on their progress screen until a result arrives, so navigation cannot detach an in-flight cleanup.
+
+Ratatui never collects a sudo password. Before an operation containing a root command, the application disables raw mode, leaves the alternate screen, and runs `sudo -v` with inherited terminal streams. It then restores Ratatui and executes root commands through `sudo -n`. This prevents the event loop from consuming password input and prevents an expired authorization timestamp from creating an invisible prompt during background execution.
 
 ## Machine-readable interfaces
 

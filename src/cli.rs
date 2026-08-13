@@ -191,7 +191,7 @@ pub struct UpdateArgs {
     /// Preview the update without replacing the current binary
     #[arg(long)]
     pub dry_run: bool,
-    /// Install a specific release, for example 0.3.0
+    /// Install a specific release, for example 0.4.0
     #[arg(long = "version", value_name = "VERSION")]
     pub target_version: Option<String>,
     /// Confirm the update non-interactively
@@ -214,21 +214,7 @@ impl Default for HistoryArgs {
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Some(command) => run_command(command),
-        None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
-            if let Some(action) = tui::interactive_menu()? {
-                run_command(match action {
-                    tui::MenuAction::Clean => Commands::Clean(CleanArgs::default()),
-                    tui::MenuAction::Uninstall => Commands::Uninstall(UninstallArgs::default()),
-                    tui::MenuAction::Analyze => Commands::Analyze(AnalyzeArgs::default()),
-                    tui::MenuAction::Purge => Commands::Purge(PurgeArgs::default()),
-                    tui::MenuAction::Status => Commands::Status(StatusArgs::default()),
-                    tui::MenuAction::History => Commands::History(HistoryArgs::default()),
-                    tui::MenuAction::Update => Commands::Update(UpdateArgs::default()),
-                })
-            } else {
-                Ok(())
-            }
-        }
+        None if io::stdin().is_terminal() && io::stdout().is_terminal() => tui::interactive_app(),
         None => {
             Cli::command().print_help()?;
             println!();

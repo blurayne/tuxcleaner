@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail};
@@ -51,6 +52,15 @@ pub struct AnalysisReport {
 }
 
 pub fn analyze(root: &Path, minimum_size: u64, max_depth: usize) -> Result<AnalysisReport> {
+    analyze_cancellable(root, minimum_size, max_depth, &AtomicBool::new(false))
+}
+
+pub(crate) fn analyze_cancellable(
+    root: &Path,
+    minimum_size: u64,
+    max_depth: usize,
+    cancelled: &AtomicBool,
+) -> Result<AnalysisReport> {
     if !root.exists() {
         bail!("analysis path does not exist: {}", root.display());
     }
@@ -69,6 +79,9 @@ pub fn analyze(root: &Path, minimum_size: u64, max_depth: usize) -> Result<Analy
         .filter_entry(should_visit);
 
     for result in walker {
+        if cancelled.load(Ordering::Relaxed) {
+            bail!("analysis cancelled");
+        }
         let entry = match result {
             Ok(entry) => entry,
             Err(_) => {
@@ -227,5 +240,16 @@ mod tests {
             report.large_files[0].path,
             root.path().join("Downloads/archive.bin")
         );
+    }
+
+    #[test]
+    fn cancellable_analysis_stops_before_traversal() {
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("file.bin"), vec![0; 10]).unwrap();
+        let cancelled = AtomicBool::new(true);
+
+        let error = analyze_cancellable(root.path(), 1, 10, &cancelled).unwrap_err();
+
+        assert_eq!(error.to_string(), "analysis cancelled");
     }
 }
