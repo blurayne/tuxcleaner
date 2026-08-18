@@ -9,7 +9,24 @@ use walkdir::{DirEntry, WalkDir};
 use crate::model::{CleanupAction, CleanupGroup, CleanupItem, Risk};
 use crate::scanner::dir_size;
 
-const ARTIFACTS: &[&str] = &["node_modules", "target", ".build", "build", "dist", ".venv"];
+const ARTIFACTS: &[&str] = &[
+    "node_modules",
+    "target",
+    ".build",
+    "build",
+    "dist",
+    ".venv",
+    ".terraform",
+    ".terragrunt-cache",
+    ".flatpak-builder",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".tox",
+    ".next",
+    ".turbo",
+    ".parcel-cache",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PurgeCandidate {
@@ -143,5 +160,73 @@ mod tests {
         let results = scan_artifacts(&[root.path().to_path_buf()], 0);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].path, target);
+    }
+
+    #[test]
+    fn finds_terraform_terragrunt_and_flatpak_builder_artifacts() {
+        let root = tempdir().unwrap();
+        let terraform = root.path().join("project/.terraform");
+        let terragrunt_cache = root.path().join("project/.terragrunt-cache");
+        let flatpak_builder = root.path().join("project/.flatpak-builder");
+        let hidden_terraform = root.path().join("project/.git/.terraform");
+        fs::create_dir_all(&terraform).unwrap();
+        fs::create_dir_all(&terragrunt_cache).unwrap();
+        fs::create_dir_all(&flatpak_builder).unwrap();
+        fs::create_dir_all(&hidden_terraform).unwrap();
+        fs::write(terraform.join("provider"), vec![0; 10]).unwrap();
+        fs::write(terragrunt_cache.join("cache"), vec![0; 10]).unwrap();
+        fs::write(flatpak_builder.join("build"), vec![0; 10]).unwrap();
+        fs::write(hidden_terraform.join("provider"), vec![0; 10]).unwrap();
+
+        let mut results = scan_artifacts(&[root.path().to_path_buf()], 0);
+        results.sort_by(|a, b| a.path.cmp(&b.path));
+        let paths: Vec<_> = results
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect();
+        assert_eq!(paths, {
+            let mut expected = vec![
+                terraform.clone(),
+                terragrunt_cache.clone(),
+                flatpak_builder.clone(),
+            ];
+            expected.sort();
+            expected
+        });
+        assert!(!paths.contains(&hidden_terraform));
+    }
+
+    #[test]
+    fn finds_python_and_javascript_build_tool_caches() {
+        let root = tempdir().unwrap();
+        let names = [
+            ".pytest_cache",
+            ".ruff_cache",
+            ".mypy_cache",
+            ".tox",
+            ".next",
+            ".turbo",
+            ".parcel-cache",
+        ];
+        let mut expected: Vec<PathBuf> = Vec::new();
+        for name in names {
+            let dir = root.path().join("project").join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("data"), vec![0; 10]).unwrap();
+            expected.push(dir);
+        }
+        let hidden = root.path().join("project/.git/.pytest_cache");
+        fs::create_dir_all(&hidden).unwrap();
+        fs::write(hidden.join("data"), vec![0; 10]).unwrap();
+
+        let mut results = scan_artifacts(&[root.path().to_path_buf()], 0);
+        results.sort_by(|a, b| a.path.cmp(&b.path));
+        let paths: Vec<_> = results
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect();
+        expected.sort();
+        assert_eq!(paths, expected);
+        assert!(!paths.contains(&hidden));
     }
 }
