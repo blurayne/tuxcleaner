@@ -682,6 +682,15 @@ pub fn is_valid_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._+:@-".contains(&byte))
 }
 
+/// Validates a snap revision number as reported by `snap list --all` and used
+/// in `/var/lib/snapd/snaps/<name>_<revision>.snap` file names. Revisions are
+/// plain decimal integers; this deliberately rejects the `x`-prefixed form
+/// snapd uses for locally sideloaded snaps, since that form has not been
+/// confirmed to require removal support here.
+pub fn is_valid_snap_revision(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 10 && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 pub fn is_protected_package(package: &str) -> bool {
     let normalized = normalize_native_package(package).to_ascii_lowercase();
     const EXACT: &[&str] = &[
@@ -905,5 +914,16 @@ mod tests {
         assert!(is_protected_package("linux-image-amd64"));
         assert!(!is_protected_package("firefox"));
         assert_eq!(parse_reported_size("441.3\u{a0}MB"), 441_300_000);
+    }
+
+    #[test]
+    fn snap_revisions_must_be_plain_decimal_numbers() {
+        assert!(is_valid_snap_revision("8664"));
+        assert!(is_valid_snap_revision("1"));
+        assert!(!is_valid_snap_revision(""));
+        assert!(!is_valid_snap_revision("x1"));
+        assert!(!is_valid_snap_revision("12a"));
+        assert!(!is_valid_snap_revision("-1"));
+        assert!(!is_valid_snap_revision("12345678901"));
     }
 }

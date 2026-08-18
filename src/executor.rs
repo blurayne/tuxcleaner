@@ -7,6 +7,7 @@ use crate::model::{ActionResult, CleanupAction, CleanupItem};
 use crate::models::{huggingface_hub_dir, is_valid_ollama_model_name};
 use crate::uninstall::{
     Application, ApplicationSource, UninstallPreview, is_protected_package, is_valid_identifier,
+    is_valid_snap_revision,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -486,6 +487,12 @@ fn is_allowed_command(program: &str, args: &[String], requires_root: bool) -> bo
             is_valid_identifier(name)
         }
         ("ollama", ["rm", name], false) => is_valid_ollama_model_name(name),
+        ("snap", ["remove", revision_flag, name], true) => {
+            revision_flag
+                .strip_prefix("--revision=")
+                .is_some_and(is_valid_snap_revision)
+                && is_valid_identifier(name)
+        }
         _ => false,
     }
 }
@@ -1045,5 +1052,90 @@ mod tests {
         let result = executor.execute_uninstall(&application("systemd"), false);
         assert!(!result.success);
         assert!(calls.lock().unwrap().is_empty());
+    }
+
+    fn snap_item(name: &str, revision: &str) -> CleanupItem {
+        CleanupItem {
+            id: format!("packages.snap.{name}.{revision}"),
+            group: CleanupGroup::System,
+            label: format!("Disabled snap revision {name} r{revision}"),
+            estimated_bytes: 1_000,
+            risk: Risk::Elevated,
+            action: CleanupAction::Command {
+                program: "snap".into(),
+                args: vec![
+                    "remove".into(),
+                    format!("--revision={revision}"),
+                    name.into(),
+                ],
+                requires_root: true,
+            },
+        }
+    }
+
+    #[test]
+    fn snap_revision_removal_uses_the_exact_command_shape_and_requires_root() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = Executor::with_runner(
+            PathBuf::from("/home/tester"),
+            RecordingRunner {
+                calls: calls.clone(),
+            },
+        );
+        let result = executor.execute(&snap_item("firefox", "8664"), false);
+        assert!(result.success, "{}", result.message);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [(
+                "snap".into(),
+                vec!["remove".into(), "--revision=8664".into(), "firefox".into()],
+                true,
+            )]
+        );
+    }
+
+    #[test]
+    fn snap_removal_rejects_names_with_shell_metacharacters() {
+        assert!(!is_allowed_command(
+            "snap",
+            &[
+                "remove".into(),
+                "--revision=8664".into(),
+                "firefox; rm -rf ~".into()
+            ],
+            true
+        ));
+    }
+
+    #[test]
+    fn snap_removal_rejects_names_with_a_leading_dash() {
+        assert!(!is_allowed_command(
+            "snap",
+            &["remove".into(), "--revision=8664".into(), "-firefox".into()],
+            true
+        ));
+    }
+
+    #[test]
+    fn snap_removal_rejects_non_numeric_revisions() {
+        assert!(!is_allowed_command(
+            "snap",
+            &["remove".into(), "--revision=x1".into(), "firefox".into()],
+            true
+        ));
+        assert!(!is_allowed_command(
+            "snap",
+            &["remove".into(), "8664".into(), "firefox".into()],
+            true
+        ));
+    }
+
+    #[test]
+    fn snap_removal_without_root_is_rejected() {
+        assert!(!is_allowed_command(
+            "snap",
+            &["remove".into(), "--revision=8664".into(), "firefox".into()],
+            false
+        ));
     }
 }
