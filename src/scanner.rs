@@ -68,12 +68,7 @@ impl Scanner {
             ));
         }
 
-        items.sort_by(|a, b| {
-            a.group
-                .title()
-                .cmp(b.group.title())
-                .then_with(|| b.estimated_bytes.cmp(&a.estimated_bytes))
-        });
+        sort_items_by_group_size(&mut items);
         ScanReport::from_items(self.distro.name.clone(), items, warnings)
     }
 
@@ -247,6 +242,22 @@ pub fn summarize_by_group(items: &[CleanupItem]) -> HashMap<CleanupGroup, u64> {
     sizes
 }
 
+/// Orders cleanup items so the group with the largest total reclaimable
+/// size sorts first, and within each group the largest item sorts first.
+/// Ties are broken deterministically (group title, then item size, then
+/// item id) so JSON output does not churn between otherwise-equal runs.
+pub fn sort_items_by_group_size(items: &mut [CleanupItem]) {
+    let group_totals = summarize_by_group(items);
+    let group_total = |group: CleanupGroup| group_totals.get(&group).copied().unwrap_or(0);
+    items.sort_by(|a, b| {
+        group_total(b.group)
+            .cmp(&group_total(a.group))
+            .then_with(|| a.group.title().cmp(b.group.title()))
+            .then_with(|| b.estimated_bytes.cmp(&a.estimated_bytes))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -278,5 +289,78 @@ mod tests {
         let report = scanner.scan();
         assert!(report.items.iter().any(|item| item.id == "dev..cache.pip"));
         assert!(!report.items.iter().any(|item| item.id.contains("mozilla")));
+    }
+
+    fn item(id: &str, group: CleanupGroup, estimated_bytes: u64) -> CleanupItem {
+        CleanupItem {
+            id: id.into(),
+            group,
+            label: id.into(),
+            estimated_bytes,
+            risk: Risk::Low,
+            action: CleanupAction::RemovePath {
+                path: PathBuf::from("/tmp").join(id),
+                contents_only: false,
+            },
+        }
+    }
+
+    #[test]
+    fn sort_orders_groups_by_total_and_items_by_size_within_group() {
+        let mut items = vec![
+            item("system.a", CleanupGroup::System, 100),
+            item("user.a", CleanupGroup::User, 50),
+            item("user.b", CleanupGroup::User, 80),
+            item("dev.a", CleanupGroup::Dev, 200),
+        ];
+        sort_items_by_group_size(&mut items);
+        let ids: Vec<_> = items.iter().map(|item| item.id.as_str()).collect();
+        // Dev totals 200, User totals 130, System totals 100, Containers is
+        // absent. Within User, the 80-byte item must precede the 50-byte one.
+        assert_eq!(ids, ["dev.a", "user.b", "user.a", "system.a"]);
+    }
+
+    #[test]
+    fn sort_breaks_ties_deterministically_by_id() {
+        let mut items = vec![
+            item("dev.b", CleanupGroup::Dev, 100),
+            item("dev.a", CleanupGroup::Dev, 100),
+        ];
+        sort_items_by_group_size(&mut items);
+        let ids: Vec<_> = items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["dev.a", "dev.b"]);
+    }
+
+    #[test]
+    fn scan_report_groups_order_matches_item_order() {
+        let mut items = vec![
+            item("system.a", CleanupGroup::System, 100),
+            item("user.a", CleanupGroup::User, 50),
+            item("user.b", CleanupGroup::User, 80),
+            item("dev.a", CleanupGroup::Dev, 200),
+        ];
+        sort_items_by_group_size(&mut items);
+        let report = ScanReport::from_items("Test".into(), items, Vec::new());
+
+        let groups_with_items: Vec<_> = report
+            .groups
+            .iter()
+            .filter(|summary| summary.item_count > 0)
+            .map(|summary| summary.group)
+            .collect();
+        assert_eq!(
+            groups_with_items,
+            [CleanupGroup::Dev, CleanupGroup::User, CleanupGroup::System]
+        );
+
+        // The group order (largest total first) must match the order in
+        // which those groups first appear among the sorted items.
+        let mut first_seen = Vec::new();
+        for item in &report.items {
+            if !first_seen.contains(&item.group) {
+                first_seen.push(item.group);
+            }
+        }
+        assert_eq!(groups_with_items, first_seen);
     }
 }
