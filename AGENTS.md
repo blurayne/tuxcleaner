@@ -40,6 +40,12 @@ These exist in our fork and must never appear in an upstream pull request:
 
 Add to this list whenever new fork-only material is introduced.
 
+## Intentional divergences from upstream policy
+
+`CLAUDE.md` is upstream's file and must never be edited in this fork, because every edit becomes a permanent merge conflict on each sync. Where our fork deliberately departs from a rule stated there, record it here instead.
+
+**Hidden application data is selectable in `analyze`.** `CLAUDE.md` says "Large personal files and hidden application data are reported only, never deleted by `analyze`." Our fork relaxes the hidden-data half of that rule: a large file under a dot-directory can be selected and removed through the normal explicit-selection and confirmation flow. Authorized by the repository owner on 2026-08-18. Every other protection still applies, and `.ssh`, `.gnupg`, `.config`, and `.git` remain hard-blocked at any size under the separate invariant that forbids deleting them. Any branch carrying this change is fork-only and must never be sent upstream.
+
 ## Recipes
 
 Sync the mirror and bring upstream changes into our fork:
