@@ -59,7 +59,7 @@ impl Scanner {
         self.scan_known_paths(USER_CACHE_PATHS, CleanupGroup::User, &mut items);
         self.scan_trash(&mut items);
         self.scan_known_paths(DEV_CACHE_PATHS, CleanupGroup::Dev, &mut items);
-        self.scan_containers(&mut items);
+        self.scan_containers(&mut items, &mut warnings);
 
         if self.distro.family == DistroFamily::Unsupported {
             warnings.push(format!(
@@ -167,37 +167,8 @@ impl Scanner {
         }
     }
 
-    fn scan_containers(&self, items: &mut Vec<CleanupItem>) {
-        if command_exists("docker") {
-            items.push(CleanupItem {
-                id: "containers.docker".into(),
-                group: CleanupGroup::Containers,
-                label:
-                    "Stopped containers, dangling images, networks, and build cache (never volumes)"
-                        .into(),
-                estimated_bytes: 0,
-                risk: Risk::Elevated,
-                action: CleanupAction::Command {
-                    program: "docker".into(),
-                    args: vec!["system".into(), "prune".into(), "-f".into()],
-                    requires_root: false,
-                },
-            });
-        }
-        if command_exists("flatpak") {
-            items.push(CleanupItem {
-                id: "containers.flatpak".into(),
-                group: CleanupGroup::Containers,
-                label: "Unused Flatpak runtimes".into(),
-                estimated_bytes: 0,
-                risk: Risk::Elevated,
-                action: CleanupAction::Command {
-                    program: "flatpak".into(),
-                    args: vec!["uninstall".into(), "--unused".into(), "-y".into()],
-                    requires_root: false,
-                },
-            });
-        }
+    fn scan_containers(&self, items: &mut Vec<CleanupItem>, warnings: &mut Vec<String>) {
+        crate::containers::scan(items, warnings);
     }
 }
 
