@@ -28,7 +28,7 @@ pub enum ExecutionError {
 
 /// Locations that must never be selectable or removable via `analyze`, regardless of size and
 /// regardless of the general hidden-path policy applied to personal files. Shared by the TUI's
-/// pre-selection check (`is_selectable_personal_file` in `src/tui/view.rs`) and
+/// pre-selection check (`personal_file_selectability` in `src/tui/view.rs`) and
 /// `validate_personal_file`'s execution-time re-check below, so the two enforce exactly the same
 /// rule and can never independently drift apart.
 ///
@@ -44,6 +44,25 @@ pub fn is_denylisted_personal_file_path(relative: &Path) -> bool {
         || relative.components().any(|component| {
             matches!(component, Component::Normal(name) if PROTECTED_LOCATIONS.contains(&name.to_string_lossy().as_ref()))
         })
+}
+
+/// Whether `path` is itself the root of a git repository, meaning a `.git` entry exists directly
+/// inside it. `CLAUDE.md` forbids deleting `.git`, and `is_denylisted_personal_file_path` above
+/// already blocks any path that *is* or *contains* a `.git` path component, but neither of those
+/// stops a user from selecting the repository's working directory itself (for example
+/// `~/code/project`) for recursive removal: `~/code/project` does not contain `.git` as one of
+/// *its own* path components, yet removing it destroys `~/code/project/.git` just as thoroughly.
+///
+/// This check is deliberately shallow: it protects only the exact directory the caller is
+/// pointing at and does not walk the tree looking for nested repositories, because that would be
+/// prohibitively expensive to run during interactive rendering (this runs once per visible
+/// directory row, every frame, via `personal_file_selectability`).
+///
+/// Shared by the TUI's pre-selection check (`personal_file_selectability` in `src/tui/view.rs`)
+/// and `validate_personal_file`'s execution-time re-check below, exactly like
+/// `is_denylisted_personal_file_path`, so the two can never independently drift apart.
+pub fn is_git_repository_root(path: &Path) -> bool {
+    fs::symlink_metadata(path.join(".git")).is_ok()
 }
 
 pub trait CommandRunner {
@@ -365,7 +384,14 @@ impl<R: CommandRunner> Executor<R> {
             path: path.to_path_buf(),
             source,
         })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if metadata.file_type().is_symlink() {
+            return Err(ExecutionError::UnsafePath(path.to_path_buf()));
+        }
+        if metadata.is_dir() {
+            if is_git_repository_root(path) {
+                return Err(ExecutionError::UnsafePath(path.to_path_buf()));
+            }
+        } else if !metadata.is_file() {
             return Err(ExecutionError::UnsafePath(path.to_path_buf()));
         }
         Ok(())
@@ -960,6 +986,135 @@ mod tests {
             );
             assert!(file.exists(), "{relative} should not have been removed");
         }
+    }
+
+    #[test]
+    fn accepts_and_recursively_removes_a_large_directory() {
+        // The owner of this fork has extended the hidden-data/personal-file relaxation to
+        // directories: a large directory under home can now be selected and removed, and the
+        // removal is recursive (see `remove_entry`, which already picks `remove_dir_all` for a
+        // real, non-symlink directory).
+        let root = tempdir().unwrap();
+        let dir = root.path().join("Videos/recordings");
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("clip1.mp4"), b"data").unwrap();
+        fs::write(dir.join("nested/clip2.mp4"), b"more-data").unwrap();
+        let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
+
+        assert!(executor.validate_personal_file(&dir).is_ok());
+
+        let item = CleanupItem {
+            id: "large-file:test".into(),
+            group: CleanupGroup::User,
+            label: "recordings".into(),
+            estimated_bytes: 13,
+            risk: Risk::Explicit,
+            action: CleanupAction::RemovePersonalFile { path: dir.clone() },
+        };
+        let result = executor.execute(&item, false);
+        assert!(result.success, "{}", result.message);
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn rejects_a_directory_that_is_a_git_repository_root() {
+        // `.git` must never be removed. `is_denylisted_personal_file_path` blocks any path that
+        // *is* or *contains* a `.git` component, but a project's working directory itself (for
+        // example `~/code/project`) does not contain `.git` as one of its own components, so
+        // without `is_git_repository_root` a user could select the whole project and destroy its
+        // `.git` by recursively removing the parent directory.
+        let root = tempdir().unwrap();
+        let project = root.path().join("code/project");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::write(project.join("README.md"), vec![0u8; 8]).unwrap();
+        let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
+
+        assert!(executor.validate_personal_file(&project).is_err());
+        assert!(project.exists());
+        assert!(project.join(".git").exists());
+    }
+
+    #[test]
+    fn rejects_protected_personal_directory_locations() {
+        // The denylist must refuse a protected location as a directory too, not only when it
+        // shows up as (or inside) a file path.
+        let root = tempdir().unwrap();
+        let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
+        for relative in [".ssh", ".gnupg", ".config", ".git", "go/pkg"] {
+            let dir = root.path().join(relative);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("data.bin"), vec![0u8; 8]).unwrap();
+            assert!(
+                executor.validate_personal_file(&dir).is_err(),
+                "expected directory {relative} to be rejected"
+            );
+            assert!(dir.exists(), "{relative} should not have been removed");
+        }
+    }
+
+    #[test]
+    fn symlinked_directory_removal_is_refused_and_target_survives() {
+        // The most important regression test for this change: a symlink pointing at a large
+        // directory must be refused, and the real directory it points at (plus everything
+        // inside it) must still exist afterwards. `validate_personal_file` uses
+        // `symlink_metadata`, so the symlink itself is inspected and rejected without ever
+        // following it into the target directory.
+        let root = tempdir().unwrap();
+        let real_target = root.path().join("real-large-dir");
+        fs::create_dir_all(&real_target).unwrap();
+        fs::write(real_target.join("payload.bin"), b"data").unwrap();
+        let link = root.path().join("linked-large-dir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_target, &link).unwrap();
+        let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
+
+        assert!(executor.validate_personal_file(&link).is_err());
+
+        let item = CleanupItem {
+            id: "large-file:test".into(),
+            group: CleanupGroup::User,
+            label: "linked-large-dir".into(),
+            estimated_bytes: 4,
+            risk: Risk::Explicit,
+            action: CleanupAction::RemovePersonalFile { path: link.clone() },
+        };
+        let result = executor.execute(&item, false);
+        assert!(!result.success);
+        assert!(real_target.exists(), "the symlink target must survive");
+        assert!(real_target.join("payload.bin").exists());
+    }
+
+    #[test]
+    fn rejects_unsafe_directory_targets() {
+        // The home directory itself, a path with a `..` component, a symlinked directory, and a
+        // directory with a symlinked ancestor must all still be refused now that plain
+        // directories are otherwise selectable.
+        let root = tempdir().unwrap();
+        let home = root.path().to_path_buf();
+        let executor = Executor::with_runner(home.clone(), SuccessfulRunner);
+
+        assert!(executor.validate_personal_file(&home).is_err());
+
+        let escaping = home.join("Videos/../../etc");
+        assert!(executor.validate_personal_file(&escaping).is_err());
+
+        let real_dir = root.path().join("elsewhere-dir");
+        fs::create_dir_all(&real_dir).unwrap();
+        let link = home.join("linked-dir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+        assert!(executor.validate_personal_file(&link).is_err());
+        assert!(real_dir.exists());
+
+        let ancestor_target = root.path().join("ancestor-target");
+        fs::create_dir_all(&ancestor_target).unwrap();
+        let ancestor_link = home.join("ancestor-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&ancestor_target, &ancestor_link).unwrap();
+        let nested = ancestor_link.join("nested-dir");
+        fs::create_dir_all(&nested).unwrap();
+        assert!(executor.validate_personal_file(&nested).is_err());
+        assert!(ancestor_target.exists());
     }
 
     fn application(package: &str) -> Application {

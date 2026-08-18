@@ -427,14 +427,23 @@ fn drain_location(location: &mut Location) {
     }
 }
 
+/// Size and directory-ness of a path pending removal in `analyze`, tracked alongside its size so
+/// `draw_delete_confirmation` can warn about recursive directory removal without re-statting the
+/// filesystem during rendering.
+#[derive(Debug, Clone, Copy)]
+struct PendingRemoval {
+    size: u64,
+    is_dir: bool,
+}
+
 struct AnalyzeState {
     home: PathBuf,
     /// Drill-down stack; the last entry is the active (displayed) location.
     locations: Vec<Location>,
     mode: AnalyzeMode,
     list_state: ListState,
-    selected_files: BTreeMap<PathBuf, u64>,
-    pending_delete: BTreeMap<PathBuf, u64>,
+    selected_files: BTreeMap<PathBuf, PendingRemoval>,
+    pending_delete: BTreeMap<PathBuf, PendingRemoval>,
     confirming_delete: bool,
     results: Option<Vec<ActionResult>>,
     status: String,
@@ -1098,7 +1107,7 @@ impl AnalyzeState {
         }
     }
 
-    fn focused_file(&self) -> Result<(PathBuf, u64), FocusRefusal> {
+    fn focused_file(&self) -> Result<(PathBuf, PendingRemoval), FocusRefusal> {
         let index = self
             .list_state
             .selected()
@@ -1110,7 +1119,15 @@ impl AnalyzeState {
                     .get(index)
                     .ok_or(FocusRefusal::NoSelection)?;
                 personal_file_selectability(&self.home, &entry.path, entry.is_dir, entry.size)
-                    .map(|()| (entry.path.clone(), entry.size))
+                    .map(|()| {
+                        (
+                            entry.path.clone(),
+                            PendingRemoval {
+                                size: entry.size,
+                                is_dir: entry.is_dir,
+                            },
+                        )
+                    })
                     .map_err(FocusRefusal::NotSelectable)
             }
             AnalyzeMode::TopFiles => {
@@ -1119,7 +1136,15 @@ impl AnalyzeState {
                     .get(index)
                     .ok_or(FocusRefusal::NoSelection)?;
                 personal_file_selectability(&self.home, &file.path, false, file.size)
-                    .map(|()| (file.path.clone(), file.size))
+                    .map(|()| {
+                        (
+                            file.path.clone(),
+                            PendingRemoval {
+                                size: file.size,
+                                is_dir: false,
+                            },
+                        )
+                    })
                     .map_err(FocusRefusal::NotSelectable)
             }
         }
@@ -1131,9 +1156,9 @@ impl AnalyzeState {
             return;
         }
         match self.focused_file() {
-            Ok((path, size)) => {
+            Ok((path, entry)) => {
                 if self.selected_files.remove(&path).is_none() {
-                    self.selected_files.insert(path, size);
+                    self.selected_files.insert(path, entry);
                 }
                 self.update_selection_status();
             }
@@ -1174,9 +1199,9 @@ impl AnalyzeState {
         let results: Vec<_> = self
             .pending_delete
             .iter()
-            .map(|(path, size)| LargeFile {
+            .map(|(path, entry)| LargeFile {
                 path: path.clone(),
-                size: *size,
+                size: entry.size,
                 modified_unix: None,
                 app_data: false,
             })
@@ -1204,7 +1229,7 @@ impl AnalyzeState {
     }
 
     fn update_selection_status(&mut self) {
-        let total: u64 = self.selected_files.values().sum();
+        let total: u64 = self.selected_files.values().map(|entry| entry.size).sum();
         self.status = if self.selected_files.is_empty() {
             format!("Scanned {}", format_bytes(self.active().total_size))
         } else {
@@ -1308,13 +1333,13 @@ impl AnalyzeState {
                 .into_iter()
                 .map(|entry| {
                     let selected = self.selected_files.contains_key(&entry.path);
-                    let selectable = is_selectable_personal_file(
+                    let selectability = personal_file_selectability(
                         &self.home,
                         &entry.path,
                         entry.is_dir,
                         entry.size,
                     );
-                    disk_item(entry, total, selected, selectable)
+                    disk_item(entry, total, selected, selectability)
                 })
                 .collect(),
             AnalyzeMode::TopFiles => self
@@ -1322,9 +1347,9 @@ impl AnalyzeState {
                 .into_iter()
                 .map(|file| {
                     let selected = self.selected_files.contains_key(&file.path);
-                    let selectable =
-                        is_selectable_personal_file(&self.home, &file.path, false, file.size);
-                    file_item(file, total, selected, selectable)
+                    let selectability =
+                        personal_file_selectability(&self.home, &file.path, false, file.size);
+                    file_item(file, total, selected, selectability)
                 })
                 .collect(),
         }
@@ -1428,6 +1453,8 @@ mod tests {
     use ratatui::backend::TestBackend;
     use tempfile::tempdir;
 
+    use crate::model::{CleanupGroup, CleanupItem, Risk};
+
     use super::*;
 
     fn ready_analyze(home: &Path, file: PathBuf) -> AnalyzeState {
@@ -1472,6 +1499,14 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Test-only convenience wrapper around `personal_file_selectability`, mirroring what used
+    /// to be the standalone `is_selectable_personal_file` helper. Production code now goes
+    /// through `personal_file_selectability` directly so it can render the specific refusal
+    /// reason inline (see `append_refusal_tag`), rather than collapsing it to a bool first.
+    fn selectable(home: &Path, path: &Path, is_dir: bool, size: u64) -> bool {
+        personal_file_selectability(home, path, is_dir, size).is_ok()
     }
 
     #[test]
@@ -1523,25 +1558,25 @@ mod tests {
         // hidden directory (e.g. `.ollama`) is now selectable, while `.config` (and the other
         // specifically protected locations) remain refused regardless of hiddenness.
         let home = Path::new("/home/tester");
-        assert!(!is_selectable_personal_file(
+        assert!(!selectable(
             home,
             Path::new("/home/tester/.config/private.bin"),
             false,
             ANALYZE_MINIMUM_SIZE
         ));
-        assert!(is_selectable_personal_file(
+        assert!(selectable(
             home,
             Path::new("/home/tester/.ollama/models/blobs/sha256-abc"),
             false,
             ANALYZE_MINIMUM_SIZE
         ));
-        assert!(is_selectable_personal_file(
+        assert!(selectable(
             home,
             Path::new("/home/tester/Downloads/archive.iso"),
             false,
             ANALYZE_MINIMUM_SIZE
         ));
-        assert!(!is_selectable_personal_file(
+        assert!(!selectable(
             home,
             Path::new("/home/tester/Downloads/note.txt"),
             false,
@@ -1552,6 +1587,10 @@ mod tests {
     #[test]
     fn selectability_reasons_are_specific_to_the_refusal_cause() {
         let home = Path::new("/home/tester");
+        // Directories are selectable in general now; a plain (non-git) directory at or above the
+        // floor is accepted, exactly like a file. The nonexistent path is fine here because
+        // `is_git_repository_root` only looks for a `.git` entry and a missing directory simply
+        // has none.
         assert_eq!(
             personal_file_selectability(
                 home,
@@ -1559,7 +1598,7 @@ mod tests {
                 true,
                 ANALYZE_MINIMUM_SIZE
             ),
-            Err(PersonalFileRefusal::Directory)
+            Ok(())
         );
         assert_eq!(
             personal_file_selectability(
@@ -1608,7 +1647,35 @@ mod tests {
         );
     }
 
-    /// Anti-drift check: `is_selectable_personal_file` (the TUI's pre-selection gate) and
+    /// A directory that is itself a git repository root (a `.git` entry lives directly inside
+    /// it) must be refused with the specific `GitRepository` reason, at a size well above the
+    /// selection floor, and both the pre-selection check and the execution-time re-check must
+    /// agree. Unlike the other refusal cases above, this needs a real directory on disk because
+    /// `is_git_repository_root` stats the path for a `.git` entry.
+    #[test]
+    fn git_repository_root_directories_are_refused_with_a_specific_reason() {
+        let root = tempdir().unwrap();
+        let home = root.path().to_path_buf();
+        let project = home.join("code/project");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::write(project.join("README.md"), b"hello").unwrap();
+
+        // `size` is the value the scanner already computed for this directory and is passed in
+        // independently of what is physically on disk here, so a tiny fixture file is enough to
+        // exercise a "well above the floor" size without actually writing hundreds of megabytes.
+        assert_eq!(
+            personal_file_selectability(&home, &project, true, ANALYZE_MINIMUM_SIZE),
+            Err(PersonalFileRefusal::GitRepository)
+        );
+        assert!(!selectable(&home, &project, true, ANALYZE_MINIMUM_SIZE));
+
+        let executor = Executor::new(home);
+        assert!(executor.validate_personal_file(&project).is_err());
+        assert!(project.exists(), "the repository must not be removed");
+        assert!(project.join(".git").exists());
+    }
+
+    /// Anti-drift check: `personal_file_selectability` (the TUI's pre-selection gate) and
     /// `Executor::validate_personal_file` (the execution-time re-check) must agree on every path
     /// the UI would offer, or a user could select and confirm removal of a file that execution
     /// then silently refuses. This exercises real files on disk, since `validate_personal_file`
@@ -1620,43 +1687,167 @@ mod tests {
         let executor = Executor::new(home.clone());
         let big = ANALYZE_MINIMUM_SIZE;
 
-        let cases: &[(&str, u64, bool)] = &[
-            ("Downloads/archive.iso", big, true),
-            (".ollama/models/blobs/sha256-abc", big, true),
-            (".local/share/containers/storage/disk.qcow2", big, true),
-            ("go/pkg/mod/archive.bin", big, false),
-            (".ssh/id_rsa_backup", big, false),
-            (".gnupg/secring.gpg", big, false),
-            (".config/app/state.bin", big, false),
-            (".git/objects/pack/big.pack", big, false),
-            ("code/project/.git/objects/pack/big.pack", big, false),
+        // (relative path, size, is_dir, expected_selectable)
+        let cases: &[(&str, u64, bool, bool)] = &[
+            ("Downloads/archive.iso", big, false, true),
+            (".ollama/models/blobs/sha256-abc", big, false, true),
+            (
+                ".local/share/containers/storage/disk.qcow2",
+                big,
+                false,
+                true,
+            ),
+            // A plain (non-git) directory is now selectable and removable, recursively, exactly
+            // like a large file.
+            ("Videos/recordings", big, true, true),
+            ("go/pkg/mod/archive.bin", big, false, false),
+            (".ssh/id_rsa_backup", big, false, false),
+            (".gnupg/secring.gpg", big, false, false),
+            (".config/app/state.bin", big, false, false),
+            (".git/objects/pack/big.pack", big, false, false),
+            ("code/project/.git/objects/pack/big.pack", big, false, false),
+            // Denylisted locations must be refused as directories too, not just as files.
+            (".ssh", big, true, false),
+            (".gnupg", big, true, false),
+            (".config", big, true, false),
+            (".git", big, true, false),
+            ("go/pkg", big, true, false),
         ];
 
-        for (relative, size, expected_selectable) in cases {
+        for (relative, size, is_dir, expected_selectable) in cases {
             let path = home.join(relative);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::File::create(&path).unwrap().set_len(*size).unwrap();
+            if *is_dir {
+                fs::create_dir_all(&path).unwrap();
+                fs::write(path.join("payload.bin"), vec![0u8; 8]).unwrap();
+            } else {
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::File::create(&path).unwrap().set_len(*size).unwrap();
+            }
 
-            let selectable = is_selectable_personal_file(&home, &path, false, *size);
+            let is_row_selectable = selectable(&home, &path, *is_dir, *size);
             assert_eq!(
-                selectable, *expected_selectable,
+                is_row_selectable, *expected_selectable,
                 "unexpected selectability for {relative}"
             );
-            if selectable {
+            if is_row_selectable {
                 assert!(
                     executor.validate_personal_file(&path).is_ok(),
-                    "validate_personal_file disagreed with is_selectable_personal_file for {relative}"
+                    "validate_personal_file disagreed with personal_file_selectability for {relative}"
                 );
             } else {
-                // Every denylisted location must be rejected by both functions; sub-threshold
-                // and directory cases are UI-only concerns (see `PersonalFileRefusal`) and are
-                // covered separately above, so this branch only ever hits denylisted paths here.
+                // Every denylisted or protected location must be rejected by both functions;
+                // sub-threshold cases are a UI-only concern (see `PersonalFileRefusal`) and are
+                // covered separately above, so this branch only ever hits denylisted or
+                // git-repository-root paths here.
                 assert!(
                     executor.validate_personal_file(&path).is_err(),
                     "protected location {relative} was unexpectedly accepted by validate_personal_file"
                 );
             }
         }
+    }
+
+    /// A large directory under home is selectable and accepted by `validate_personal_file`, and
+    /// removing it through the executor actually deletes it and everything inside it.
+    #[test]
+    fn large_directory_is_selectable_and_removed_recursively() {
+        let root = tempdir().unwrap();
+        let home = root.path().to_path_buf();
+        let dir = home.join("Videos/recordings");
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("clip1.mp4"), vec![0u8; 8]).unwrap();
+        fs::write(dir.join("nested/clip2.mp4"), vec![0u8; 8]).unwrap();
+
+        assert!(selectable(&home, &dir, true, ANALYZE_MINIMUM_SIZE));
+
+        let executor = Executor::new(home);
+        assert!(executor.validate_personal_file(&dir).is_ok());
+
+        let item = CleanupItem {
+            id: "large-file:test".into(),
+            group: CleanupGroup::User,
+            label: "recordings".into(),
+            estimated_bytes: 16,
+            risk: Risk::Explicit,
+            action: CleanupAction::RemovePersonalFile { path: dir.clone() },
+        };
+        let result = executor.execute(&item, false);
+        assert!(result.success, "{}", result.message);
+        assert!(!dir.exists());
+    }
+
+    /// The most important regression test in this set: a symlink pointing at a large directory
+    /// must be refused at execution time, and the real directory it points at (and everything
+    /// inside it) must still exist afterwards. If `validate_personal_file` or `remove_entry` ever
+    /// started following the symlink instead of statting/removing it directly, this is what would
+    /// catch it.
+    ///
+    /// This does not also assert `personal_file_selectability` refuses the symlink: that
+    /// pre-selection check does not re-stat for symlink-ness, because the scanner that feeds it
+    /// already excludes symlinks from `DiskEntry`/`LargeFile` results (the "never follow symlinks
+    /// while scanning" invariant), so a symlink is never something the UI would offer in the
+    /// first place. `Executor::validate_personal_file`, exercised below, is the authoritative,
+    /// execution-time re-check that must refuse it regardless.
+    #[test]
+    fn symlinked_directory_is_refused_and_its_target_survives() {
+        let root = tempdir().unwrap();
+        let home = root.path().to_path_buf();
+        let real_target = root.path().join("real-large-dir");
+        fs::create_dir_all(&real_target).unwrap();
+        fs::write(real_target.join("payload.bin"), vec![0u8; 8]).unwrap();
+        let link = home.join("linked-large-dir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_target, &link).unwrap();
+
+        let executor = Executor::new(home);
+        assert!(executor.validate_personal_file(&link).is_err());
+
+        let item = CleanupItem {
+            id: "large-file:test".into(),
+            group: CleanupGroup::User,
+            label: "linked-large-dir".into(),
+            estimated_bytes: ANALYZE_MINIMUM_SIZE,
+            risk: Risk::Explicit,
+            action: CleanupAction::RemovePersonalFile { path: link.clone() },
+        };
+        let result = executor.execute(&item, false);
+        assert!(!result.success);
+        assert!(real_target.exists(), "the symlink target must survive");
+        assert!(real_target.join("payload.bin").exists());
+    }
+
+    /// The home directory itself, a path containing `..`, a symlinked directory, and a directory
+    /// with a symlinked ancestor must all still be refused now that plain directories are
+    /// selectable.
+    #[test]
+    fn unsafe_directory_targets_are_still_refused() {
+        let root = tempdir().unwrap();
+        let home = root.path().to_path_buf();
+        let executor = Executor::new(home.clone());
+
+        assert!(executor.validate_personal_file(&home).is_err());
+
+        let escaping = home.join("Videos/../../etc");
+        assert!(executor.validate_personal_file(&escaping).is_err());
+
+        let real_dir = root.path().join("elsewhere-dir");
+        fs::create_dir_all(&real_dir).unwrap();
+        fs::write(real_dir.join("f.bin"), vec![0u8; 8]).unwrap();
+        let link = home.join("linked-dir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+        assert!(executor.validate_personal_file(&link).is_err());
+        assert!(real_dir.exists());
+
+        let ancestor_target = root.path().join("ancestor-target");
+        fs::create_dir_all(&ancestor_target).unwrap();
+        let ancestor_link = home.join("ancestor-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&ancestor_target, &ancestor_link).unwrap();
+        let nested = ancestor_link.join("nested-dir");
+        fs::create_dir_all(&nested).unwrap();
+        assert!(executor.validate_personal_file(&nested).is_err());
+        assert!(ancestor_target.exists());
     }
 
     #[test]
@@ -1680,6 +1871,70 @@ mod tests {
         assert!(rendered.contains("large.bin"));
         assert!(rendered.contains("d Delete"));
         assert!(rendered.contains("Esc back"));
+    }
+
+    /// Every refusal reason that can still reach the renderer after directories became
+    /// selectable must show its tag inline on the row, and a selectable row must show no tag at
+    /// all. `ListItem`'s content field is crate-private in ratatui, so the row text is inspected
+    /// through `{:?}`, which (per ratatui's own `Debug` impls for `Text`/`Line`/`Span`) always
+    /// includes the literal rendered string.
+    #[test]
+    fn non_selectable_rows_carry_an_inline_refusal_tag_and_selectable_rows_do_not() {
+        let entry = DiskEntry {
+            name: "example".into(),
+            path: PathBuf::from("/home/tester/example"),
+            size: ANALYZE_MINIMUM_SIZE,
+            is_dir: false,
+        };
+        let file = LargeFile {
+            path: PathBuf::from("/home/tester/example.bin"),
+            size: ANALYZE_MINIMUM_SIZE,
+            modified_unix: None,
+            app_data: false,
+        };
+
+        let cases: &[(PersonalFileRefusal, String)] = &[
+            (PersonalFileRefusal::OutsideHome, "outside home".into()),
+            (
+                PersonalFileRefusal::ProtectedLocation,
+                "protected location".into(),
+            ),
+            (PersonalFileRefusal::GitRepository, "git repository".into()),
+            (
+                PersonalFileRefusal::BelowMinimumSize,
+                format!("below {}", format_bytes(ANALYZE_MINIMUM_SIZE)),
+            ),
+        ];
+
+        // `ListItem`'s `Debug` output wraps the row text in framing like `Text::from(...)`, which
+        // itself contains parentheses, so a bare `contains('(')` would false-positive on every
+        // row. Checking for the exact `(tag)` annotation for each known tag avoids that.
+        let selectable_disk_row = format!("{:?}", disk_item(&entry, entry.size, false, Ok(())));
+        let selectable_file_row = format!("{:?}", file_item(&file, file.size, false, Ok(())));
+        for (_, tag) in cases {
+            let annotation = format!("({tag})");
+            assert!(
+                !selectable_disk_row.contains(&annotation),
+                "a selectable directory row must not carry a refusal tag: {selectable_disk_row}"
+            );
+            assert!(
+                !selectable_file_row.contains(&annotation),
+                "a selectable file row must not carry a refusal tag: {selectable_file_row}"
+            );
+        }
+
+        for (refusal, tag) in cases {
+            let disk_row = format!("{:?}", disk_item(&entry, entry.size, false, Err(*refusal)));
+            assert!(
+                disk_row.contains(&format!("({tag})")),
+                "expected disk row to contain tag {tag:?}: {disk_row}"
+            );
+            let file_row = format!("{:?}", file_item(&file, file.size, false, Err(*refusal)));
+            assert!(
+                file_row.contains(&format!("({tag})")),
+                "expected file row to contain tag {tag:?}: {file_row}"
+            );
+        }
     }
 
     #[test]
