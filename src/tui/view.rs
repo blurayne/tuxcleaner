@@ -560,7 +560,7 @@ pub(super) fn draw_analyze(frame: &mut Frame<'_>, state: &mut AnalyzeState) {
         frame.render_stateful_widget(list, chunks[1], &mut state.list_state);
     }
 
-    let selected_total: u64 = state.selected_files.values().sum();
+    let selected_total: u64 = state.selected_files.values().map(|entry| entry.size).sum();
     let filter = if state.filtering {
         format!("Filter: {}▌", state.filter)
     } else if !state.filter.is_empty() {
@@ -603,54 +603,51 @@ pub(super) fn disk_item(
     entry: &DiskEntry,
     total: u64,
     selected: bool,
-    selectable: bool,
+    selectability: Result<(), PersonalFileRefusal>,
 ) -> ListItem<'static> {
-    let marker = selection_marker(selected, selectable);
+    let marker = selection_marker(selected, selectability.is_ok());
     let percent = percentage(entry.size, total);
     let icon = if entry.is_dir { "▸" } else { " " };
-    let label = format!(
+    let mut label = format!(
         "{marker} {:>5.1}% {} {icon} {}  {:>10}",
         percent,
         progress_bar(percent, 12),
         entry.name,
         format_bytes(entry.size)
     );
-    report_only_item(label, selectable)
+    append_refusal_tag(&mut label, selectability);
+    ListItem::new(label)
 }
 
 pub(super) fn file_item(
     file: &LargeFile,
     total: u64,
     selected: bool,
-    selectable: bool,
+    selectability: Result<(), PersonalFileRefusal>,
 ) -> ListItem<'static> {
-    let marker = selection_marker(selected, selectable);
+    let marker = selection_marker(selected, selectability.is_ok());
     let percent = percentage(file.size, total);
-    let label = format!(
+    let mut label = format!(
         "{marker} {:>5.1}% {}   {}  {:>10}",
         percent,
         progress_bar(percent, 12),
         file.path.display(),
         format_bytes(file.size)
     );
-    report_only_item(label, selectable)
+    append_refusal_tag(&mut label, selectability);
+    ListItem::new(label)
 }
 
-/// Wraps a rendered row so rows that cannot be selected (protected locations, sub-threshold
-/// files, directories) are visually dimmed, distinguishing them at a glance from rows the user
-/// can actually act on. The `selection_marker` glyph already carries this information for
-/// screen readers / plain-text contexts; this adds a color cue on top of it without otherwise
-/// restructuring the list styling.
-fn report_only_item(label: String, selectable: bool) -> ListItem<'static> {
-    if selectable {
-        ListItem::new(label)
-    } else {
-        ListItem::new(Span::styled(
-            label,
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        ))
+/// Appends a short, parenthesized reason tag to a row's label when it is not selectable, so the
+/// reason is visible on the row itself without pressing Space. A selectable row is left
+/// untouched. Shares `PersonalFileRefusal` with `personal_file_selectability` and
+/// `personal_file_refusal_message`, so the tag can never disagree with the reason a status
+/// message would report for the same row.
+fn append_refusal_tag(label: &mut String, selectability: Result<(), PersonalFileRefusal>) {
+    if let Err(refusal) = selectability {
+        label.push_str("  (");
+        label.push_str(&personal_file_refusal_tag(refusal));
+        label.push(')');
     }
 }
 
@@ -685,7 +682,7 @@ pub(super) fn progress_bar(percent: f64, width: usize) -> String {
 pub(super) enum PersonalFileRefusal {
     OutsideHome,
     ProtectedLocation,
-    Directory,
+    GitRepository,
     BelowMinimumSize,
 }
 
@@ -697,6 +694,10 @@ pub(super) enum PersonalFileRefusal {
 /// module cache under `go/pkg`) is not relaxed and is enforced here via the same
 /// `is_denylisted_personal_file_path` that `Executor::validate_personal_file` checks at
 /// execution time, so the two can never independently drift apart.
+///
+/// Directories are selectable and are removed recursively, so a directory that is itself a git
+/// repository root (a `.git` entry lives directly inside it) is refused via
+/// `is_git_repository_root`, shared with `Executor::validate_personal_file` for the same reason.
 pub(super) fn personal_file_selectability(
     home: &Path,
     path: &Path,
@@ -709,8 +710,8 @@ pub(super) fn personal_file_selectability(
     if crate::executor::is_denylisted_personal_file_path(relative) {
         return Err(PersonalFileRefusal::ProtectedLocation);
     }
-    if is_dir {
-        return Err(PersonalFileRefusal::Directory);
+    if is_dir && crate::executor::is_git_repository_root(path) {
+        return Err(PersonalFileRefusal::GitRepository);
     }
     if size < ANALYZE_MINIMUM_SIZE {
         return Err(PersonalFileRefusal::BelowMinimumSize);
@@ -727,8 +728,8 @@ pub(super) fn personal_file_refusal_message(refusal: PersonalFileRefusal) -> Str
             "This is a protected location (.ssh, .gnupg, .config, .git, or go/pkg) and cannot be selected"
                 .into()
         }
-        PersonalFileRefusal::Directory => {
-            "Directories cannot be selected; open one to see the files inside".into()
+        PersonalFileRefusal::GitRepository => {
+            "This is a git repository and cannot be removed here".into()
         }
         PersonalFileRefusal::BelowMinimumSize => format!(
             "Only files at or above {} can be selected",
@@ -737,17 +738,26 @@ pub(super) fn personal_file_refusal_message(refusal: PersonalFileRefusal) -> Str
     }
 }
 
-pub(super) fn is_selectable_personal_file(
-    home: &Path,
-    path: &Path,
-    is_dir: bool,
-    size: u64,
-) -> bool {
-    personal_file_selectability(home, path, is_dir, size).is_ok()
+/// Short, dense-row form of the same refusal reason reported in full sentences by
+/// `personal_file_refusal_message`. Rendered inline on every non-selectable row by `disk_item`
+/// and `file_item` via `append_refusal_tag`, so the row explains itself without the user having
+/// to press Space first. Every variant that `personal_file_selectability` can still return after
+/// directories became selectable is covered here; there is no catch-all fallback, so a new
+/// refusal variant must be given a tag before it can compile.
+pub(super) fn personal_file_refusal_tag(refusal: PersonalFileRefusal) -> String {
+    match refusal {
+        PersonalFileRefusal::OutsideHome => "outside home".into(),
+        PersonalFileRefusal::ProtectedLocation => "protected location".into(),
+        PersonalFileRefusal::GitRepository => "git repository".into(),
+        PersonalFileRefusal::BelowMinimumSize => {
+            format!("below {}", format_bytes(ANALYZE_MINIMUM_SIZE))
+        }
+    }
 }
 
 pub(super) fn draw_delete_confirmation(frame: &mut Frame<'_>, state: &AnalyzeState) {
-    let total: u64 = state.pending_delete.values().sum();
+    let total: u64 = state.pending_delete.values().map(|entry| entry.size).sum();
+    let has_directory = state.pending_delete.values().any(|entry| entry.is_dir);
     let detail = if state.pending_delete.len() == 1 {
         state
             .pending_delete
@@ -758,18 +768,25 @@ pub(super) fn draw_delete_confirmation(frame: &mut Frame<'_>, state: &AnalyzeSta
     } else {
         format!("{} selected files", state.pending_delete.len())
     };
-    let text = vec![
+    let mut text = vec![
         Line::from(Span::styled(
             "Permanently remove?",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(detail),
-        Line::from(format!("Total: {}", format_bytes(total))),
-        Line::from(""),
-        Line::from("Enter: confirm   Esc: cancel"),
     ];
-    draw_overlay(frame, " Confirm removal ", text, 70, 9);
+    if has_directory {
+        text.push(Line::from(Span::styled(
+            "This is a directory: it and all of its contents will be permanently removed.",
+            Style::default().fg(Color::Red),
+        )));
+    }
+    text.push(Line::from(format!("Total: {}", format_bytes(total))));
+    text.push(Line::from(""));
+    text.push(Line::from("Enter: confirm   Esc: cancel"));
+    let height = if has_directory { 11 } else { 9 };
+    draw_overlay(frame, " Confirm removal ", text, 70, height);
 }
 
 pub(super) fn draw_results(frame: &mut Frame<'_>, results: &[ActionResult]) {
