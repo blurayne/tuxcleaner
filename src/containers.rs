@@ -13,6 +13,12 @@ use crate::model::{CleanupAction, CleanupGroup, CleanupItem, Risk};
 use crate::scanner::command_exists;
 use crate::uninstall::is_valid_identifier;
 
+/// Warning pushed into `warnings` whenever a Docker or Podman prune item is
+/// emitted, since `system prune` removes stopped containers (not just
+/// dangling images and build cache) and a long-lived stopped container can
+/// vanish along with any application built on top of it.
+const CONTAINER_PRUNE_WARNING: &str = "start any container you want to keep running before cleanup: Docker and Podman prune delete stopped containers, including ones you plan to start again; named volumes are never touched";
+
 /// Adds Docker, Podman, and Flatpak "unused" cleanup items to `items`.
 ///
 /// Each tool is only offered when its binary is present on `PATH`. Podman
@@ -37,8 +43,23 @@ fn scan_with_runner<R: CommandRunner>(
             items.push(podman_connection_item(&name));
         }
     }
+    push_container_prune_warning_if_needed(items, warnings);
     if command_exists("flatpak") {
         items.push(flatpak_item());
+    }
+}
+
+/// Pushes `CONTAINER_PRUNE_WARNING` into `warnings`, but only once, when
+/// `items` already contains a Docker or Podman prune item (identified by the
+/// `containers.docker` / `containers.podman` id prefixes emitted by
+/// `docker_item`, `podman_rootless_item`, `podman_rootful_item`, and
+/// `podman_connection_item`).
+fn push_container_prune_warning_if_needed(items: &[CleanupItem], warnings: &mut Vec<String>) {
+    let prunes_containers = items.iter().any(|item| {
+        item.id.starts_with("containers.docker") || item.id.starts_with("containers.podman")
+    });
+    if prunes_containers {
+        warnings.push(CONTAINER_PRUNE_WARNING.into());
     }
 }
 
@@ -46,7 +67,7 @@ fn docker_item() -> CleanupItem {
     CleanupItem {
         id: "containers.docker".into(),
         group: CleanupGroup::Containers,
-        label: "Stopped containers, dangling images, networks, and build cache (never volumes)"
+        label: "Stopped containers, including ones you plan to start again, plus dangling images, networks, and build cache (never volumes)"
             .into(),
         estimated_bytes: 0,
         risk: Risk::Elevated,
@@ -77,7 +98,7 @@ fn podman_rootless_item() -> CleanupItem {
     CleanupItem {
         id: "containers.podman.rootless".into(),
         group: CleanupGroup::Containers,
-        label: "Podman (rootless): stopped containers, dangling images, networks, and build cache (never volumes)".into(),
+        label: "Podman (rootless): stopped containers, including ones you plan to start again, plus dangling images, networks, and build cache (never volumes)".into(),
         estimated_bytes: 0,
         risk: Risk::Elevated,
         action: CleanupAction::Command {
@@ -92,7 +113,7 @@ fn podman_rootful_item() -> CleanupItem {
     CleanupItem {
         id: "containers.podman.rootful".into(),
         group: CleanupGroup::Containers,
-        label: "Podman (root): stopped containers, dangling images, networks, and build cache (never volumes)".into(),
+        label: "Podman (root): stopped containers, including ones you plan to start again, plus dangling images, networks, and build cache (never volumes)".into(),
         estimated_bytes: 0,
         risk: Risk::Elevated,
         action: CleanupAction::Command {
@@ -108,7 +129,7 @@ fn podman_connection_item(name: &str) -> CleanupItem {
         id: format!("containers.podman.connection.{name}"),
         group: CleanupGroup::Containers,
         label: format!(
-            "Podman connection \"{name}\": stopped containers, dangling images, networks, and build cache (never volumes)"
+            "Podman connection \"{name}\": stopped containers, including ones you plan to start again, plus dangling images, networks, and build cache (never volumes)"
         ),
         estimated_bytes: 0,
         risk: Risk::Elevated,
@@ -412,6 +433,146 @@ mod tests {
             if let CleanupAction::Command { args, .. } = &item.action {
                 assert!(!args.iter().any(|arg| arg == "--volumes"));
             }
+        }
+    }
+
+    #[test]
+    fn container_prune_warning_fires_when_a_docker_item_is_present() {
+        let items = vec![docker_item()];
+        let mut warnings = Vec::new();
+        push_container_prune_warning_if_needed(&items, &mut warnings);
+        assert_eq!(warnings, [CONTAINER_PRUNE_WARNING.to_string()]);
+    }
+
+    #[test]
+    fn container_prune_warning_fires_when_a_podman_item_is_present() {
+        let items = vec![podman_rootless_item()];
+        let mut warnings = Vec::new();
+        push_container_prune_warning_if_needed(&items, &mut warnings);
+        assert_eq!(warnings, [CONTAINER_PRUNE_WARNING.to_string()]);
+
+        let items = vec![podman_rootful_item()];
+        let mut warnings = Vec::new();
+        push_container_prune_warning_if_needed(&items, &mut warnings);
+        assert_eq!(warnings, [CONTAINER_PRUNE_WARNING.to_string()]);
+
+        let items = vec![podman_connection_item("staging")];
+        let mut warnings = Vec::new();
+        push_container_prune_warning_if_needed(&items, &mut warnings);
+        assert_eq!(warnings, [CONTAINER_PRUNE_WARNING.to_string()]);
+    }
+
+    #[test]
+    fn container_prune_warning_is_absent_when_neither_docker_nor_podman_is_present() {
+        let items: Vec<CleanupItem> = Vec::new();
+        let mut warnings = Vec::new();
+        push_container_prune_warning_if_needed(&items, &mut warnings);
+        assert!(warnings.is_empty());
+
+        let items = vec![flatpak_item()];
+        let mut warnings = Vec::new();
+        push_container_prune_warning_if_needed(&items, &mut warnings);
+        assert!(
+            warnings.is_empty(),
+            "Flatpak-only items must not trigger the container prune warning"
+        );
+    }
+
+    /// Locks in the exact ids and command argument arrays for every prune
+    /// item so future label/warning wording changes cannot silently drift
+    /// JSON output compatibility.
+    #[test]
+    fn container_item_ids_and_command_args_are_unchanged() {
+        let docker = docker_item();
+        assert_eq!(docker.id, "containers.docker");
+        assert_eq!(docker.risk, Risk::Elevated);
+        match &docker.action {
+            CleanupAction::Command {
+                program,
+                args,
+                requires_root,
+            } => {
+                assert_eq!(program, "docker");
+                assert_eq!(args, &["system".to_string(), "prune".into(), "-f".into()]);
+                assert!(!requires_root);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        let rootless = podman_rootless_item();
+        assert_eq!(rootless.id, "containers.podman.rootless");
+        assert_eq!(rootless.risk, Risk::Elevated);
+        match &rootless.action {
+            CleanupAction::Command {
+                program,
+                args,
+                requires_root,
+            } => {
+                assert_eq!(program, "podman");
+                assert_eq!(args, &["system".to_string(), "prune".into(), "-f".into()]);
+                assert!(!requires_root);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        let rootful = podman_rootful_item();
+        assert_eq!(rootful.id, "containers.podman.rootful");
+        assert_eq!(rootful.risk, Risk::Elevated);
+        match &rootful.action {
+            CleanupAction::Command {
+                program,
+                args,
+                requires_root,
+            } => {
+                assert_eq!(program, "podman");
+                assert_eq!(args, &["system".to_string(), "prune".into(), "-f".into()]);
+                assert!(requires_root);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        let connection = podman_connection_item("staging");
+        assert_eq!(connection.id, "containers.podman.connection.staging");
+        assert_eq!(connection.risk, Risk::Elevated);
+        match &connection.action {
+            CleanupAction::Command {
+                program,
+                args,
+                requires_root,
+            } => {
+                assert_eq!(program, "podman");
+                assert_eq!(
+                    args,
+                    &[
+                        "--connection".to_string(),
+                        "staging".into(),
+                        "system".into(),
+                        "prune".into(),
+                        "-f".into(),
+                    ]
+                );
+                assert!(!requires_root);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        let flatpak = flatpak_item();
+        assert_eq!(flatpak.id, "containers.flatpak");
+        assert_eq!(flatpak.risk, Risk::Elevated);
+        match &flatpak.action {
+            CleanupAction::Command {
+                program,
+                args,
+                requires_root,
+            } => {
+                assert_eq!(program, "flatpak");
+                assert_eq!(
+                    args,
+                    &["uninstall".to_string(), "--unused".into(), "-y".into()]
+                );
+                assert!(!requires_root);
+            }
+            other => panic!("unexpected action: {other:?}"),
         }
     }
 }
