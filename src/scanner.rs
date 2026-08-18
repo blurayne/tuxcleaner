@@ -16,6 +16,7 @@ const USER_CACHE_PATHS: &[(&str, &str)] = &[
     (".cache/mozilla", "Firefox cache"),
     (".cache/chromium", "Chromium cache"),
     (".cache/google-chrome", "Google Chrome cache"),
+    (".cache/microsoft-edge", "Microsoft Edge cache"),
     (".cache/BraveSoftware", "Brave cache"),
     (".cache/vivaldi", "Vivaldi cache"),
     (".cache/opera", "Opera cache"),
@@ -32,6 +33,16 @@ const DEV_CACHE_PATHS: &[(&str, &str)] = &[
     ("go/pkg/mod", "Go module cache"),
     (".gradle/caches", "Gradle cache"),
     (".cache/composer", "Composer cache"),
+    (".cache/uv", "uv package manager cache"),
+    (".pnpm-store", "pnpm content-addressable store"),
+    (".cache/terragrunt", "Terragrunt provider cache"),
+    (".terraform.d/plugin-cache", "Terraform plugin cache"),
+    (".cache/ms-playwright", "Playwright browser downloads"),
+    (".cache/.bun", "Bun install cache"),
+    (".cache/zig", "Zig compiler cache"),
+    (".cache/pre-commit", "pre-commit hook environments"),
+    (".cache/go-build", "Go build cache"),
+    (".cache/ms-playwright-go", "Playwright Go driver cache"),
 ];
 
 pub struct Scanner {
@@ -278,5 +289,83 @@ mod tests {
         let report = scanner.scan();
         assert!(report.items.iter().any(|item| item.id == "dev..cache.pip"));
         assert!(!report.items.iter().any(|item| item.id.contains("mozilla")));
+    }
+
+    #[test]
+    fn scan_includes_uv_and_pnpm_store_only_when_populated() {
+        let root = tempdir().unwrap();
+        let scanner = Scanner::new(
+            root.path().to_path_buf(),
+            Distribution::parse_os_release("ID=custom\nNAME=Custom\n"),
+        );
+
+        // Neither directory exists yet: neither id should appear.
+        let report = scanner.scan();
+        assert!(!report.items.iter().any(|item| item.id == "dev..cache.uv"));
+        assert!(!report.items.iter().any(|item| item.id == "dev..pnpm-store"));
+
+        let uv_cache = root.path().join(".cache/uv");
+        fs::create_dir_all(&uv_cache).unwrap();
+        fs::write(uv_cache.join("wheel"), vec![0; 64]).unwrap();
+        let pnpm_store = root.path().join(".pnpm-store");
+        fs::create_dir_all(&pnpm_store).unwrap();
+        fs::write(pnpm_store.join("blob"), vec![0; 64]).unwrap();
+
+        let report = scanner.scan();
+        assert!(report.items.iter().any(|item| item.id == "dev..cache.uv"));
+        assert!(report.items.iter().any(|item| item.id == "dev..pnpm-store"));
+    }
+
+    #[test]
+    fn scan_includes_additional_dev_and_browser_caches_only_when_populated() {
+        let root = tempdir().unwrap();
+        let scanner = Scanner::new(
+            root.path().to_path_buf(),
+            Distribution::parse_os_release("ID=custom\nNAME=Custom\n"),
+        );
+
+        let expected_absent = [
+            "dev..cache.terragrunt",
+            "dev..terraform.d.plugin-cache",
+            "dev..cache.ms-playwright",
+            "dev..cache..bun",
+            "dev..cache.zig",
+            "dev..cache.pre-commit",
+            "dev..cache.go-build",
+            "dev..cache.ms-playwright-go",
+            "user..cache.microsoft-edge",
+        ];
+        let report = scanner.scan();
+        for id in expected_absent {
+            assert!(
+                !report.items.iter().any(|item| item.id == id),
+                "expected {id} to be absent before the directory exists"
+            );
+        }
+
+        let populated = [
+            (".cache/terragrunt", "dev..cache.terragrunt"),
+            (".terraform.d/plugin-cache", "dev..terraform.d.plugin-cache"),
+            (".cache/ms-playwright", "dev..cache.ms-playwright"),
+            (".cache/.bun", "dev..cache..bun"),
+            (".cache/zig", "dev..cache.zig"),
+            (".cache/pre-commit", "dev..cache.pre-commit"),
+            (".cache/go-build", "dev..cache.go-build"),
+            (".cache/ms-playwright-go", "dev..cache.ms-playwright-go"),
+            (".cache/microsoft-edge", "user..cache.microsoft-edge"),
+        ];
+        for (relative, _) in populated {
+            let dir = root.path().join(relative);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("data"), vec![0; 32]).unwrap();
+        }
+
+        let report = scanner.scan();
+        for (_, id) in populated {
+            assert!(
+                report.items.iter().any(|item| item.id == id),
+                "expected {id} to be present once the directory is populated"
+            );
+        }
     }
 }

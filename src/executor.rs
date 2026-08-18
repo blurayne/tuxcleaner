@@ -250,6 +250,7 @@ impl<R: CommandRunner> Executor<R> {
             ".cache/mozilla",
             ".cache/chromium",
             ".cache/google-chrome",
+            ".cache/microsoft-edge",
             ".cache/BraveSoftware",
             ".cache/vivaldi",
             ".cache/opera",
@@ -264,6 +265,16 @@ impl<R: CommandRunner> Executor<R> {
             "go/pkg/mod",
             ".gradle/caches",
             ".cache/composer",
+            ".cache/uv",
+            ".pnpm-store",
+            ".cache/terragrunt",
+            ".terraform.d/plugin-cache",
+            ".cache/ms-playwright",
+            ".cache/.bun",
+            ".cache/zig",
+            ".cache/pre-commit",
+            ".cache/go-build",
+            ".cache/ms-playwright-go",
         ];
         let artifact = path
             .file_name()
@@ -271,7 +282,22 @@ impl<R: CommandRunner> Executor<R> {
             .is_some_and(|name| {
                 matches!(
                     name,
-                    "node_modules" | "target" | ".build" | "build" | "dist" | ".venv"
+                    "node_modules"
+                        | "target"
+                        | ".build"
+                        | "build"
+                        | "dist"
+                        | ".venv"
+                        | ".terraform"
+                        | ".terragrunt-cache"
+                        | ".flatpak-builder"
+                        | ".pytest_cache"
+                        | ".ruff_cache"
+                        | ".mypy_cache"
+                        | ".tox"
+                        | ".next"
+                        | ".turbo"
+                        | ".parcel-cache"
                 )
             });
         if !known.contains(&normalized.as_ref()) && !artifact {
@@ -614,6 +640,151 @@ mod tests {
             executor
                 .validate_path(Path::new("/home/tester/Documents"))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn refuses_a_near_miss_sibling_of_a_known_cache_path() {
+        let home = PathBuf::from("/home/tester");
+        let executor = Executor::with_runner(home, SuccessfulRunner);
+        assert!(
+            executor
+                .validate_path(Path::new("/home/tester/.cache/uv-evil"))
+                .is_err()
+        );
+        assert!(
+            executor
+                .validate_path(Path::new("/home/tester/.cache/uv"))
+                .is_ok()
+        );
+        assert!(
+            executor
+                .validate_path(Path::new("/home/tester/.pnpm-store"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn refuses_a_symlinked_known_cache_path() {
+        let root = tempdir().unwrap();
+        let real_target = root.path().join("elsewhere");
+        fs::create_dir_all(&real_target).unwrap();
+        let cache_dir = root.path().join(".cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let uv_link = cache_dir.join("uv");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_target, &uv_link).unwrap();
+
+        let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
+        let result = executor.execute(&item(uv_link.clone()), false);
+        assert!(!result.success);
+        assert!(real_target.exists());
+    }
+
+    #[test]
+    fn accepts_the_new_dev_and_browser_cache_paths() {
+        let home = PathBuf::from("/home/tester");
+        let executor = Executor::with_runner(home, SuccessfulRunner);
+        for accepted in [
+            "/home/tester/.cache/terragrunt",
+            "/home/tester/.terraform.d/plugin-cache",
+            "/home/tester/.cache/ms-playwright",
+            "/home/tester/.cache/.bun",
+            "/home/tester/.cache/zig",
+            "/home/tester/.cache/pre-commit",
+            "/home/tester/.cache/go-build",
+            "/home/tester/.cache/ms-playwright-go",
+            "/home/tester/.cache/microsoft-edge",
+        ] {
+            assert!(
+                executor.validate_path(Path::new(accepted)).is_ok(),
+                "expected {accepted} to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_terraform_d_itself_and_near_miss_siblings() {
+        let home = PathBuf::from("/home/tester");
+        let executor = Executor::with_runner(home, SuccessfulRunner);
+        // The whole .terraform.d directory also holds credentials and CLI
+        // configuration, so only the plugin-cache subdirectory is allowed.
+        assert!(
+            executor
+                .validate_path(Path::new("/home/tester/.terraform.d"))
+                .is_err()
+        );
+        assert!(
+            executor
+                .validate_path(Path::new("/home/tester/.terraform.d/credentials.tfrc.json"))
+                .is_err()
+        );
+        assert!(
+            executor
+                .validate_path(Path::new("/home/tester/.cache/zig-evil"))
+                .is_err()
+        );
+        assert!(
+            executor
+                .validate_path(Path::new("/home/tester/.cache/pre-commit-evil"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn accepts_the_new_project_artifact_names() {
+        let home = PathBuf::from("/home/tester");
+        let executor = Executor::with_runner(home, SuccessfulRunner);
+        for accepted in [
+            "/home/tester/project/.pytest_cache",
+            "/home/tester/project/.ruff_cache",
+            "/home/tester/project/.mypy_cache",
+            "/home/tester/project/.tox",
+            "/home/tester/project/.next",
+            "/home/tester/project/.turbo",
+            "/home/tester/project/.parcel-cache",
+        ] {
+            assert!(
+                executor.validate_path(Path::new(accepted)).is_ok(),
+                "expected {accepted} to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_explicitly_omitted_artifact_names() {
+        let home = PathBuf::from("/home/tester");
+        let executor = Executor::with_runner(home, SuccessfulRunner);
+        // These were deliberately excluded from ARTIFACTS: __pycache__ nests
+        // at every package level, vendor/ is frequently version-controlled,
+        // and .direnv can hold expensive-to-rebuild or Nix profile state.
+        for rejected in [
+            "/home/tester/project/pkg/__pycache__",
+            "/home/tester/project/vendor",
+            "/home/tester/project/.direnv",
+        ] {
+            assert!(
+                executor.validate_path(Path::new(rejected)).is_err(),
+                "expected {rejected} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_filename_match_is_not_depth_aware() {
+        // Documents current behavior: the artifact filename check in
+        // validate_path only matches on the final path component, so a
+        // directory named .terraform is accepted whether it sits directly
+        // under $HOME or nested inside a project. This is a pre-existing
+        // property of the name-based check (shared with node_modules,
+        // target, etc.), not something introduced by this change.
+        let home = PathBuf::from("/home/tester");
+        let executor = Executor::with_runner(home.clone(), SuccessfulRunner);
+        assert!(executor.validate_path(&home.join(".terraform")).is_ok());
+        assert!(
+            executor
+                .validate_path(&home.join("project/nested/.terraform"))
+                .is_ok()
         );
     }
 

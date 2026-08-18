@@ -20,7 +20,7 @@ pub enum Commands {
     Uninstall(UninstallArgs),
     /// Analyze disk usage and optionally remove explicitly selected large files
     Analyze(AnalyzeArgs),
-    /// Find and remove old project build artifacts
+    /// Find and remove old project build artifacts (note: .terraform may contain local Terraform state)
     Purge(PurgeArgs),
     /// Show a read-only system health snapshot
     Status(StatusArgs),
