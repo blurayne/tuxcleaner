@@ -615,7 +615,7 @@ pub(super) fn disk_item(
         entry.name,
         format_bytes(entry.size)
     );
-    ListItem::new(label)
+    report_only_item(label, selectable)
 }
 
 pub(super) fn file_item(
@@ -633,7 +633,25 @@ pub(super) fn file_item(
         file.path.display(),
         format_bytes(file.size)
     );
-    ListItem::new(label)
+    report_only_item(label, selectable)
+}
+
+/// Wraps a rendered row so rows that cannot be selected (protected locations, sub-threshold
+/// files, directories) are visually dimmed, distinguishing them at a glance from rows the user
+/// can actually act on. The `selection_marker` glyph already carries this information for
+/// screen readers / plain-text contexts; this adds a color cue on top of it without otherwise
+/// restructuring the list styling.
+fn report_only_item(label: String, selectable: bool) -> ListItem<'static> {
+    if selectable {
+        ListItem::new(label)
+    } else {
+        ListItem::new(Span::styled(
+            label,
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ))
+    }
 }
 
 pub(super) fn selection_marker(selected: bool, selectable: bool) -> &'static str {
@@ -659,21 +677,73 @@ pub(super) fn progress_bar(percent: f64, width: usize) -> String {
     format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
 }
 
+/// Why `analyze` refuses to let a path be selected for removal. Returned by
+/// `personal_file_selectability` so both the boolean check used for rendering
+/// (`is_selectable_personal_file`) and the reason-specific status message shown by
+/// `toggle_selection` share exactly one source of truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PersonalFileRefusal {
+    OutsideHome,
+    ProtectedLocation,
+    Directory,
+    BelowMinimumSize,
+}
+
+/// Determines whether `path` may be selected for removal in `analyze`, and if not, why.
+///
+/// Hidden paths are allowed (the owner of this fork has explicitly relaxed that half of the
+/// "large personal files and hidden application data are reported only" invariant), but a hard
+/// denylist of protected locations (`.ssh`, `.gnupg`, `.config`, `.git`, and the read-only Go
+/// module cache under `go/pkg`) is not relaxed and is enforced here via the same
+/// `is_denylisted_personal_file_path` that `Executor::validate_personal_file` checks at
+/// execution time, so the two can never independently drift apart.
+pub(super) fn personal_file_selectability(
+    home: &Path,
+    path: &Path,
+    is_dir: bool,
+    size: u64,
+) -> Result<(), PersonalFileRefusal> {
+    let Ok(relative) = path.strip_prefix(home) else {
+        return Err(PersonalFileRefusal::OutsideHome);
+    };
+    if crate::executor::is_denylisted_personal_file_path(relative) {
+        return Err(PersonalFileRefusal::ProtectedLocation);
+    }
+    if is_dir {
+        return Err(PersonalFileRefusal::Directory);
+    }
+    if size < ANALYZE_MINIMUM_SIZE {
+        return Err(PersonalFileRefusal::BelowMinimumSize);
+    }
+    Ok(())
+}
+
+pub(super) fn personal_file_refusal_message(refusal: PersonalFileRefusal) -> String {
+    match refusal {
+        PersonalFileRefusal::OutsideHome => {
+            "Only files under the home directory can be selected".into()
+        }
+        PersonalFileRefusal::ProtectedLocation => {
+            "This is a protected location (.ssh, .gnupg, .config, .git, or go/pkg) and cannot be selected"
+                .into()
+        }
+        PersonalFileRefusal::Directory => {
+            "Directories cannot be selected; open one to see the files inside".into()
+        }
+        PersonalFileRefusal::BelowMinimumSize => format!(
+            "Only files at or above {} can be selected",
+            format_bytes(ANALYZE_MINIMUM_SIZE)
+        ),
+    }
+}
+
 pub(super) fn is_selectable_personal_file(
     home: &Path,
     path: &Path,
     is_dir: bool,
     size: u64,
 ) -> bool {
-    if is_dir || size < ANALYZE_MINIMUM_SIZE || !path.starts_with(home) {
-        return false;
-    }
-    let Ok(relative) = path.strip_prefix(home) else {
-        return false;
-    };
-    !relative.components().any(|component| {
-        matches!(component, Component::Normal(name) if name.to_string_lossy().starts_with('.'))
-    }) && !relative.starts_with("go/pkg")
+    personal_file_selectability(home, path, is_dir, size).is_ok()
 }
 
 pub(super) fn draw_delete_confirmation(frame: &mut Frame<'_>, state: &AnalyzeState) {

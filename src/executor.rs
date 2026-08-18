@@ -26,6 +26,26 @@ pub enum ExecutionError {
     },
 }
 
+/// Locations that must never be selectable or removable via `analyze`, regardless of size and
+/// regardless of the general hidden-path policy applied to personal files. Shared by the TUI's
+/// pre-selection check (`is_selectable_personal_file` in `src/tui/view.rs`) and
+/// `validate_personal_file`'s execution-time re-check below, so the two enforce exactly the same
+/// rule and can never independently drift apart.
+///
+/// Checked against every component of the path relative to `home`, not just the first. A
+/// first-component-only check would miss a large file inside a project's own `.git` (for
+/// example `~/code/project/.git/objects/pack-....pack`) or a `.config`/`.ssh`/`.gnupg` directory
+/// that happens to live somewhere other than directly under `home`; those are exactly the kind
+/// of location this denylist exists to protect, so the any-component form is the safer choice.
+/// This mirrors how `validate_path`'s own `.git` check already works, a few lines below.
+pub fn is_denylisted_personal_file_path(relative: &Path) -> bool {
+    const PROTECTED_LOCATIONS: [&str; 4] = [".ssh", ".gnupg", ".config", ".git"];
+    relative.starts_with("go/pkg")
+        || relative.components().any(|component| {
+            matches!(component, Component::Normal(name) if PROTECTED_LOCATIONS.contains(&name.to_string_lossy().as_ref()))
+        })
+}
+
 pub trait CommandRunner {
     fn run(&self, program: &str, args: &[String], requires_root: bool) -> std::io::Result<Output>;
 }
@@ -337,10 +357,7 @@ impl<R: CommandRunner> Executor<R> {
         let relative = path
             .strip_prefix(&self.home)
             .map_err(|_| ExecutionError::UnsafePath(path.to_path_buf()))?;
-        if relative.components().any(|component| {
-            matches!(component, Component::Normal(name) if name.to_string_lossy().starts_with('.'))
-        }) || relative.starts_with("go/pkg")
-        {
+        if is_denylisted_personal_file_path(relative) {
             return Err(ExecutionError::UnsafePath(path.to_path_buf()));
         }
         self.ensure_no_symlink_ancestors(path)?;
@@ -902,15 +919,47 @@ mod tests {
     }
 
     #[test]
-    fn rejects_hidden_application_data_as_a_personal_file() {
+    fn accepts_hidden_application_data_as_a_personal_file() {
+        // The owner of this fork has explicitly relaxed the hidden-data half of the "large
+        // personal files and hidden application data are reported only" invariant: hidden
+        // directories such as `.ollama` or `.local/share/containers` are now selectable and
+        // removable, as long as they are not one of the specifically protected locations below.
         let root = tempdir().unwrap();
         let file = root.path().join(".models/model.bin");
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(&file, b"data").unwrap();
         let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
 
-        assert!(executor.validate_personal_file(&file).is_err());
+        assert!(executor.validate_personal_file(&file).is_ok());
         assert!(file.exists());
+    }
+
+    #[test]
+    fn rejects_protected_personal_file_locations_at_any_size() {
+        // `.ssh`, `.gnupg`, `.config`, and `.git` are NOT covered by the hidden-data relaxation:
+        // a separate CLAUDE.md invariant ("Never delete ... .git, .config, .ssh, .gnupg")
+        // protects them unconditionally, so they must stay rejected even at a single byte.
+        let root = tempdir().unwrap();
+        let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
+        for relative in [
+            ".ssh/id_rsa_backup",
+            ".gnupg/secring.gpg",
+            ".config/app/state.bin",
+            ".git/objects/pack/big.pack",
+            // Nested occurrences must also be rejected, not just directly under home, which is
+            // exactly why the denylist checks every path component instead of only the first.
+            "code/project/.git/objects/pack/big.pack",
+            "backups/.ssh/id_rsa",
+        ] {
+            let file = root.path().join(relative);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, b"x").unwrap();
+            assert!(
+                executor.validate_personal_file(&file).is_err(),
+                "expected {relative} to be rejected"
+            );
+            assert!(file.exists(), "{relative} should not have been removed");
+        }
     }
 
     fn application(package: &str) -> Application {
