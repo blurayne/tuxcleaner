@@ -11,10 +11,17 @@ pub enum CleanupGroup {
     User,
     Dev,
     Containers,
+    Models,
 }
 
 impl CleanupGroup {
-    pub const ALL: [Self; 4] = [Self::System, Self::User, Self::Dev, Self::Containers];
+    pub const ALL: [Self; 5] = [
+        Self::System,
+        Self::User,
+        Self::Dev,
+        Self::Containers,
+        Self::Models,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -22,6 +29,7 @@ impl CleanupGroup {
             Self::User => "User & app caches",
             Self::Dev => "Developer caches",
             Self::Containers => "Docker, Podman & Flatpak",
+            Self::Models => "LLM model caches",
         }
     }
 }

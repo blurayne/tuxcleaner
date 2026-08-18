@@ -5,6 +5,7 @@ pub mod distro;
 pub mod executor;
 pub mod history;
 pub mod model;
+pub mod models;
 pub mod purge;
 pub mod scanner;
 pub mod size;

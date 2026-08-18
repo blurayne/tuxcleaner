@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
 
 use crate::model::{ActionResult, CleanupAction, CleanupItem};
+use crate::models::{huggingface_hub_dir, is_valid_ollama_model_name};
 use crate::uninstall::{
     Application, ApplicationSource, UninstallPreview, is_protected_package, is_valid_identifier,
 };
@@ -274,7 +275,21 @@ impl<R: CommandRunner> Executor<R> {
                     "node_modules" | "target" | ".build" | "build" | "dist" | ".venv"
                 )
             });
-        if !known.contains(&normalized.as_ref()) && !artifact {
+        // Hugging Face cache repositories live directly under the hub
+        // directory with dynamic, but predictably prefixed, names. The
+        // parent must match exactly (already constrained to be inside
+        // `self.home` by the checks above) and the child name must start
+        // with one of the three documented repo-type prefixes.
+        let huggingface_repo = path.parent() == Some(huggingface_hub_dir(&self.home).as_path())
+            && path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| {
+                    name.starts_with("models--")
+                        || name.starts_with("datasets--")
+                        || name.starts_with("spaces--")
+                });
+        if !known.contains(&normalized.as_ref()) && !artifact && !huggingface_repo {
             return Err(ExecutionError::UnsafePath(path.to_path_buf()));
         }
         self.ensure_no_symlink_ancestors(path)?;
@@ -444,6 +459,7 @@ fn is_allowed_command(program: &str, args: &[String], requires_root: bool) -> bo
         ("podman", ["--connection", name, "system", "prune", "-f"], false) => {
             is_valid_identifier(name)
         }
+        ("ollama", ["rm", name], false) => is_valid_ollama_model_name(name),
         _ => false,
     }
 }
@@ -623,6 +639,48 @@ mod tests {
     }
 
     #[test]
+    fn accepts_a_correctly_named_huggingface_repo_under_the_hub_directory() {
+        let home = PathBuf::from("/home/tester");
+        let executor = Executor::with_runner(home, SuccessfulRunner);
+        assert!(
+            executor
+                .validate_path(Path::new(
+                    "/home/tester/.cache/huggingface/hub/models--fake--demo"
+                ))
+                .is_ok()
+        );
+        assert!(
+            executor
+                .validate_path(Path::new(
+                    "/home/tester/.cache/huggingface/hub/datasets--fake--demo"
+                ))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_matching_sibling_under_the_huggingface_hub_directory() {
+        let home = PathBuf::from("/home/tester");
+        let executor = Executor::with_runner(home, SuccessfulRunner);
+        assert!(
+            executor
+                .validate_path(Path::new("/home/tester/.cache/huggingface/hub/version.txt"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_a_correctly_named_huggingface_repo_under_the_wrong_parent() {
+        let home = PathBuf::from("/home/tester");
+        let executor = Executor::with_runner(home, SuccessfulRunner);
+        assert!(
+            executor
+                .validate_path(Path::new("/home/tester/models--fake--demo"))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn removes_exact_build_artifact_after_validation() {
         let root = tempdir().unwrap();
         let target = root.path().join("project/target");
@@ -740,6 +798,58 @@ mod tests {
                 true,
             )]
         );
+    }
+
+    fn ollama_rm_item(name: &str) -> CleanupItem {
+        CleanupItem {
+            id: format!("models.ollama.{name}"),
+            group: CleanupGroup::Models,
+            label: format!("Ollama model {name}"),
+            estimated_bytes: 1,
+            risk: Risk::Elevated,
+            action: CleanupAction::Command {
+                program: "ollama".into(),
+                args: vec!["rm".into(), name.into()],
+                requires_root: false,
+            },
+        }
+    }
+
+    #[test]
+    fn ollama_rm_is_invoked_with_exact_args() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = Executor::with_runner(
+            PathBuf::from("/home/tester"),
+            RecordingRunner {
+                calls: calls.clone(),
+            },
+        );
+        let result = executor.execute(&ollama_rm_item("qwen3-coder:latest"), false);
+        assert!(result.success, "{}", result.message);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [(
+                "ollama".into(),
+                vec!["rm".into(), "qwen3-coder:latest".into()],
+                false,
+            )]
+        );
+    }
+
+    #[test]
+    fn ollama_rm_refuses_a_malicious_model_name() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = Executor::with_runner(
+            PathBuf::from("/home/tester"),
+            RecordingRunner {
+                calls: calls.clone(),
+            },
+        );
+        let semicolon = executor.execute(&ollama_rm_item("model; rm -rf /"), false);
+        assert!(!semicolon.success);
+        let leading_dash = executor.execute(&ollama_rm_item("-rf"), false);
+        assert!(!leading_dash.success);
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]
