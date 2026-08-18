@@ -107,7 +107,7 @@ impl ScanReport {
         items: Vec<CleanupItem>,
         warnings: Vec<String>,
     ) -> Self {
-        let groups = CleanupGroup::ALL
+        let mut groups: Vec<_> = CleanupGroup::ALL
             .into_iter()
             .map(|group| {
                 let matching = items.iter().filter(|item| item.group == group);
@@ -118,6 +118,12 @@ impl ScanReport {
                 }
             })
             .collect();
+        groups.sort_by(|left, right| {
+            right
+                .estimated_bytes
+                .cmp(&left.estimated_bytes)
+                .then_with(|| left.group.title().cmp(right.group.title()))
+        });
         let estimated_total_bytes = items.iter().map(|item| item.estimated_bytes).sum();
         Self {
             distribution,
@@ -137,4 +143,64 @@ pub struct ActionResult {
     pub dry_run: bool,
     pub estimated_bytes: u64,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: &str, group: CleanupGroup, estimated_bytes: u64) -> CleanupItem {
+        CleanupItem {
+            id: id.into(),
+            group,
+            label: id.into(),
+            estimated_bytes,
+            risk: Risk::Low,
+            action: CleanupAction::RemovePath {
+                path: PathBuf::from("/tmp").join(id),
+                contents_only: false,
+            },
+        }
+    }
+
+    #[test]
+    fn from_items_orders_groups_by_estimated_bytes_descending() {
+        let items = vec![
+            item("system.a", CleanupGroup::System, 100),
+            item("dev.a", CleanupGroup::Dev, 200),
+            item("user.a", CleanupGroup::User, 50),
+        ];
+        let report = ScanReport::from_items("Test".into(), items, Vec::new());
+        let order: Vec<_> = report.groups.iter().map(|summary| summary.group).collect();
+        // Containers and Models have no items (0 bytes) and sort last, tied on
+        // size and so ordered by title. System and User are both present
+        // alongside Dev, which has the largest total.
+        assert_eq!(
+            order,
+            [
+                CleanupGroup::Dev,
+                CleanupGroup::System,
+                CleanupGroup::User,
+                CleanupGroup::Containers,
+                CleanupGroup::Models,
+            ]
+        );
+    }
+
+    #[test]
+    fn from_items_breaks_group_ties_deterministically_by_title() {
+        let items = vec![
+            item("dev.a", CleanupGroup::Dev, 100),
+            item("system.a", CleanupGroup::System, 100),
+        ];
+        let report = ScanReport::from_items("Test".into(), items, Vec::new());
+        let tied: Vec<_> = report
+            .groups
+            .iter()
+            .filter(|summary| summary.estimated_bytes == 100)
+            .map(|summary| summary.group)
+            .collect();
+        // "Developer caches" sorts before "System & packages" alphabetically.
+        assert_eq!(tied, [CleanupGroup::Dev, CleanupGroup::System]);
+    }
 }

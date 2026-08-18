@@ -169,13 +169,7 @@ impl<R: CommandRunner> ApplicationCatalog<R> {
         }
 
         self.discover_flatpaks(&mut applications, &mut warnings);
-        applications.sort_by(|left, right| {
-            left.name
-                .to_ascii_lowercase()
-                .cmp(&right.name.to_ascii_lowercase())
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        applications.dedup_by(|left, right| left.id == right.id);
+        dedup_and_sort_applications(&mut applications);
 
         ApplicationReport {
             distribution: self.distro.name.clone(),
@@ -482,6 +476,31 @@ impl<R: CommandRunner> ApplicationCatalog<R> {
             )
         }
     }
+}
+
+/// Deduplicates applications by id and orders the result so the largest
+/// application sorts first, with a deterministic tie-break.
+///
+/// Deduplication must happen before the size-descending sort: `dedup_by`
+/// only removes *adjacent* duplicates, so the list is first sorted by id
+/// (which places equal ids next to each other regardless of their reported
+/// size) and deduplicated, and only then re-sorted for display. Sorting by
+/// size first would risk leaving duplicate ids with different sizes
+/// scattered through the list, where `dedup_by` cannot find them.
+fn dedup_and_sort_applications(applications: &mut Vec<Application>) {
+    applications.sort_by(|left, right| left.id.cmp(&right.id));
+    applications.dedup_by(|left, right| left.id == right.id);
+    applications.sort_by(|left, right| {
+        right
+            .installed_bytes
+            .cmp(&left.installed_bytes)
+            .then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
+            .then_with(|| left.id.cmp(&right.id))
+    });
 }
 
 fn discover_desktop_entries(directories: &[PathBuf]) -> Vec<DesktopApplication> {
@@ -925,5 +944,62 @@ mod tests {
         assert!(!is_valid_snap_revision("12a"));
         assert!(!is_valid_snap_revision("-1"));
         assert!(!is_valid_snap_revision("12345678901"));
+    }
+
+    fn application(id: &str, name: &str, installed_bytes: u64) -> Application {
+        Application {
+            id: id.into(),
+            name: name.into(),
+            package: id.into(),
+            version: "1.0".into(),
+            source: ApplicationSource::Apt,
+            installed_bytes,
+            user_data_bytes: 0,
+            desktop_file: None,
+            user_data_paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dedup_and_sort_orders_applications_by_size_descending() {
+        let mut applications = vec![
+            application("apt:small", "Small App", 100),
+            application("apt:big", "Big App", 900),
+            application("apt:medium", "Medium App", 500),
+        ];
+        dedup_and_sort_applications(&mut applications);
+        let ids: Vec<_> = applications.iter().map(|app| app.id.as_str()).collect();
+        assert_eq!(ids, ["apt:big", "apt:medium", "apt:small"]);
+    }
+
+    #[test]
+    fn dedup_and_sort_keeps_exactly_one_survivor_for_duplicate_ids_with_different_sizes() {
+        // Two entries share an id but report different sizes (for example,
+        // discovered via different desktop entries). A naive sort-then-dedup
+        // by size would scatter them apart, so dedup_by would fail to merge
+        // them and both would leak into the final list.
+        let mut applications = vec![
+            application("apt:firefox", "Firefox", 900),
+            application("apt:other", "Other App", 500),
+            application("apt:firefox", "Firefox", 100),
+        ];
+        dedup_and_sort_applications(&mut applications);
+        let firefox_count = applications
+            .iter()
+            .filter(|app| app.id == "apt:firefox")
+            .count();
+        assert_eq!(firefox_count, 1);
+        assert_eq!(applications.len(), 2);
+    }
+
+    #[test]
+    fn dedup_and_sort_breaks_ties_deterministically_by_name_then_id() {
+        let mut applications = vec![
+            application("apt:zeta", "Zeta App", 100),
+            application("apt:alpha", "Alpha App", 100),
+        ];
+        dedup_and_sort_applications(&mut applications);
+        let ids: Vec<_> = applications.iter().map(|app| app.id.as_str()).collect();
+        assert_eq!(ids, ["apt:alpha", "apt:zeta"]);
     }
 }
