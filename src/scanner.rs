@@ -60,6 +60,7 @@ impl Scanner {
         self.scan_trash(&mut items);
         self.scan_known_paths(DEV_CACHE_PATHS, CleanupGroup::Dev, &mut items);
         self.scan_containers(&mut items);
+        crate::models::scan(&self.home, &mut items, &mut warnings);
 
         if self.distro.family == DistroFamily::Unsupported {
             warnings.push(format!(
@@ -207,6 +208,7 @@ fn group_slug(group: CleanupGroup) -> &'static str {
         CleanupGroup::User => "user",
         CleanupGroup::Dev => "dev",
         CleanupGroup::Containers => "containers",
+        CleanupGroup::Models => "models",
     }
 }
 

@@ -306,10 +306,10 @@ impl App {
                     KeyCode::Char('t') => analyze.toggle_mode(),
                     KeyCode::Char('/') => analyze.begin_filter(),
                     KeyCode::Char('r') => analyze.refresh(),
-                    KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
-                        if analyze.clear_filter_or_go_back() {
-                            self.screen = Screen::Home;
-                        }
+                    KeyCode::Esc | KeyCode::Left | KeyCode::Char('h')
+                        if analyze.clear_filter_or_go_back() =>
+                    {
+                        self.screen = Screen::Home;
                     }
                     _ => {}
                 }
