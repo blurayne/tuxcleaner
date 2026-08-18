@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Write, stdout};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -196,6 +196,16 @@ enum AnalyzeMode {
     TopFiles,
 }
 
+/// Why `AnalyzeState::focused_file` could not resolve a selectable file under the cursor.
+/// Distinguishing "nothing is under the cursor at all" from "something is under the cursor but
+/// it cannot be selected" lets `toggle_selection` report the specific, actionable reason instead
+/// of one generic message for every cause.
+#[derive(Debug)]
+enum FocusRefusal {
+    NoSelection,
+    NotSelectable(PersonalFileRefusal),
+}
+
 /// A live streaming scan in progress for one `Location`.
 struct ScanHandle {
     receiver: Receiver<ScanUpdate>,
@@ -228,7 +238,13 @@ struct Location {
     skipped: u64,
     /// Selection tracked by path identity rather than list index, so a background re-sort can
     /// never cause the cursor (or an Enter keypress) to silently jump to a different row.
+    /// Used in `Browse` mode, where `sorted` is the identity-tracked collection.
     selected: Option<PathBuf>,
+    /// The `TopFiles` mode counterpart to `selected`: identity-tracked selection into
+    /// `large_files`. Needed because `large_files` keeps growing during a live scan (see the
+    /// `ScanUpdate::Large` arm in `drain_location`) and is freshly re-sorted by size on every
+    /// `visible_large_files()` call, so a numeric list index alone cannot survive either event.
+    selected_large_file: Option<PathBuf>,
     last_reorder: Instant,
     complete: bool,
     error: Option<String>,
@@ -251,6 +267,7 @@ impl Location {
             total_files: 0,
             skipped: 0,
             selected: None,
+            selected_large_file: None,
             last_reorder: Instant::now(),
             complete: false,
             error: None,
@@ -275,6 +292,7 @@ impl Location {
         self.total_files = 0;
         self.skipped = 0;
         self.selected = None;
+        self.selected_large_file = None;
         self.complete = false;
         self.error = None;
         self.needs_reorder = true;
@@ -374,7 +392,13 @@ fn drain_location(location: &mut Location) {
                 files,
                 is_dir,
             }) => location.apply_progress(top, size, files, is_dir),
-            Ok(ScanUpdate::Large(file)) => location.large_files.push(file),
+            Ok(ScanUpdate::Large(file)) => {
+                location.large_files.push(file);
+                // Growing `large_files` shifts rows in the size-sorted `TopFiles` view exactly
+                // like a `Progress` update shifts rows in `Browse`, so it must trigger the same
+                // reorder/reconcile pass; see `reconcile_list_state`.
+                location.needs_reorder = true;
+            }
             Ok(ScanUpdate::Skipped(skipped)) => location.skipped = skipped,
             Ok(ScanUpdate::Done {
                 total_size,
@@ -869,27 +893,51 @@ impl AnalyzeState {
     }
 
     /// Syncs `list_state`'s numeric index to the active location's identity-tracked selection.
-    /// Only meaningful in `Browse` mode: in `TopFiles` mode `list_state` indexes into
-    /// `large_files`, an unrelated collection that background directory scanning never touches.
+    ///
+    /// Both modes need this: in `Browse`, background directory scanning mutates `entries` (via
+    /// `apply_progress`) and can reorder `sorted`; in `TopFiles`, it mutates `large_files` (via
+    /// the `ScanUpdate::Large` arm in `drain_location`), and `visible_large_files()` re-sorts by
+    /// size on every call. Either way, without this reconciliation the numeric index in
+    /// `list_state` stays put while the row it points at silently changes identity -- so a
+    /// `d` keypress could target a different file than the one the user was actually looking at.
     fn reconcile_list_state(&mut self) {
-        if self.mode != AnalyzeMode::Browse {
-            return;
-        }
-        let selected_path = self.active().selected.clone();
-        let (index, resolved_path) = {
-            let visible = self.visible_entries();
-            let index = selected_path
-                .as_deref()
-                .and_then(|path| visible.iter().position(|entry| entry.path == path))
-                .or((!visible.is_empty()).then_some(0));
-            let resolved_path = index
-                .and_then(|index| visible.get(index))
-                .map(|entry| entry.path.clone());
-            (index, resolved_path)
-        };
-        self.list_state.select(index);
-        if let Some(path) = resolved_path {
-            self.active_mut().selected = Some(path);
+        match self.mode {
+            AnalyzeMode::Browse => {
+                let selected_path = self.active().selected.clone();
+                let (index, resolved_path) = {
+                    let visible = self.visible_entries();
+                    let index = selected_path
+                        .as_deref()
+                        .and_then(|path| visible.iter().position(|entry| entry.path == path))
+                        .or((!visible.is_empty()).then_some(0));
+                    let resolved_path = index
+                        .and_then(|index| visible.get(index))
+                        .map(|entry| entry.path.clone());
+                    (index, resolved_path)
+                };
+                self.list_state.select(index);
+                if let Some(path) = resolved_path {
+                    self.active_mut().selected = Some(path);
+                }
+            }
+            AnalyzeMode::TopFiles => {
+                let selected_path = self.active().selected_large_file.clone();
+                let (index, resolved_path) = {
+                    let visible = self.visible_large_files();
+                    let index = selected_path
+                        .as_deref()
+                        .and_then(|path| visible.iter().position(|file| file.path == path))
+                        .or((!visible.is_empty()).then_some(0));
+                    let resolved_path = index
+                        .and_then(|index| visible.get(index))
+                        .map(|file| file.path.clone());
+                    (index, resolved_path)
+                };
+                self.list_state.select(index);
+                if let Some(path) = resolved_path {
+                    self.active_mut().selected_large_file = Some(path);
+                }
+            }
         }
     }
 
@@ -899,13 +947,24 @@ impl AnalyzeState {
             return;
         }
         self.list_state.select(Some(0));
-        if self.mode == AnalyzeMode::Browse {
-            if let Some(path) = self
-                .visible_entries()
-                .first()
-                .map(|entry| entry.path.clone())
-            {
-                self.active_mut().selected = Some(path);
+        match self.mode {
+            AnalyzeMode::Browse => {
+                if let Some(path) = self
+                    .visible_entries()
+                    .first()
+                    .map(|entry| entry.path.clone())
+                {
+                    self.active_mut().selected = Some(path);
+                }
+            }
+            AnalyzeMode::TopFiles => {
+                if let Some(path) = self
+                    .visible_large_files()
+                    .first()
+                    .map(|file| file.path.clone())
+                {
+                    self.active_mut().selected_large_file = Some(path);
+                }
             }
         }
     }
@@ -966,13 +1025,24 @@ impl AnalyzeState {
             (current + 1).min(length - 1)
         };
         self.list_state.select(Some(next));
-        if self.mode == AnalyzeMode::Browse {
-            if let Some(path) = self
-                .visible_entries()
-                .get(next)
-                .map(|entry| entry.path.clone())
-            {
-                self.active_mut().selected = Some(path);
+        match self.mode {
+            AnalyzeMode::Browse => {
+                if let Some(path) = self
+                    .visible_entries()
+                    .get(next)
+                    .map(|entry| entry.path.clone())
+                {
+                    self.active_mut().selected = Some(path);
+                }
+            }
+            AnalyzeMode::TopFiles => {
+                if let Some(path) = self
+                    .visible_large_files()
+                    .get(next)
+                    .map(|file| file.path.clone())
+                {
+                    self.active_mut().selected_large_file = Some(path);
+                }
             }
         }
     }
@@ -1028,18 +1098,29 @@ impl AnalyzeState {
         }
     }
 
-    fn focused_file(&self) -> Option<(PathBuf, u64)> {
-        let index = self.list_state.selected()?;
+    fn focused_file(&self) -> Result<(PathBuf, u64), FocusRefusal> {
+        let index = self
+            .list_state
+            .selected()
+            .ok_or(FocusRefusal::NoSelection)?;
         match self.mode {
             AnalyzeMode::Browse => {
-                let entry = *self.visible_entries().get(index)?;
-                is_selectable_personal_file(&self.home, &entry.path, entry.is_dir, entry.size)
-                    .then(|| (entry.path.clone(), entry.size))
+                let entry = *self
+                    .visible_entries()
+                    .get(index)
+                    .ok_or(FocusRefusal::NoSelection)?;
+                personal_file_selectability(&self.home, &entry.path, entry.is_dir, entry.size)
+                    .map(|()| (entry.path.clone(), entry.size))
+                    .map_err(FocusRefusal::NotSelectable)
             }
             AnalyzeMode::TopFiles => {
-                let file = *self.visible_large_files().get(index)?;
-                is_selectable_personal_file(&self.home, &file.path, false, file.size)
-                    .then(|| (file.path.clone(), file.size))
+                let file = *self
+                    .visible_large_files()
+                    .get(index)
+                    .ok_or(FocusRefusal::NoSelection)?;
+                personal_file_selectability(&self.home, &file.path, false, file.size)
+                    .map(|()| (file.path.clone(), file.size))
+                    .map_err(FocusRefusal::NotSelectable)
             }
         }
     }
@@ -1049,14 +1130,20 @@ impl AnalyzeState {
             self.status = "Selection is available once items appear".into();
             return;
         }
-        let Some((path, size)) = self.focused_file() else {
-            self.status = "Only non-hidden personal files can be selected".into();
-            return;
-        };
-        if self.selected_files.remove(&path).is_none() {
-            self.selected_files.insert(path, size);
+        match self.focused_file() {
+            Ok((path, size)) => {
+                if self.selected_files.remove(&path).is_none() {
+                    self.selected_files.insert(path, size);
+                }
+                self.update_selection_status();
+            }
+            Err(FocusRefusal::NoSelection) => {
+                self.status = "Nothing is selected".into();
+            }
+            Err(FocusRefusal::NotSelectable(refusal)) => {
+                self.status = personal_file_refusal_message(refusal);
+            }
         }
-        self.update_selection_status();
     }
 
     fn begin_delete(&mut self) {
@@ -1065,12 +1152,12 @@ impl AnalyzeState {
             return;
         }
         self.pending_delete = if self.selected_files.is_empty() {
-            self.focused_file().into_iter().collect()
+            self.focused_file().ok().into_iter().collect()
         } else {
             self.selected_files.clone()
         };
         if self.pending_delete.is_empty() {
-            self.status = "Select a non-hidden personal file first".into();
+            self.status = "Select a personal file first".into();
             return;
         }
         self.confirming_delete = true;
@@ -1430,11 +1517,21 @@ mod tests {
     }
 
     #[test]
-    fn hidden_files_are_not_selectable() {
+    fn hidden_files_are_selectable_but_protected_locations_are_not() {
+        // The owner of this fork has explicitly relaxed the hidden-data half of the "large
+        // personal files and hidden application data are reported only" invariant: an ordinary
+        // hidden directory (e.g. `.ollama`) is now selectable, while `.config` (and the other
+        // specifically protected locations) remain refused regardless of hiddenness.
         let home = Path::new("/home/tester");
         assert!(!is_selectable_personal_file(
             home,
             Path::new("/home/tester/.config/private.bin"),
+            false,
+            ANALYZE_MINIMUM_SIZE
+        ));
+        assert!(is_selectable_personal_file(
+            home,
+            Path::new("/home/tester/.ollama/models/blobs/sha256-abc"),
             false,
             ANALYZE_MINIMUM_SIZE
         ));
@@ -1450,6 +1547,116 @@ mod tests {
             false,
             ANALYZE_MINIMUM_SIZE - 1
         ));
+    }
+
+    #[test]
+    fn selectability_reasons_are_specific_to_the_refusal_cause() {
+        let home = Path::new("/home/tester");
+        assert_eq!(
+            personal_file_selectability(
+                home,
+                Path::new("/home/tester/Downloads"),
+                true,
+                ANALYZE_MINIMUM_SIZE
+            ),
+            Err(PersonalFileRefusal::Directory)
+        );
+        assert_eq!(
+            personal_file_selectability(
+                home,
+                Path::new("/home/tester/Downloads/note.txt"),
+                false,
+                ANALYZE_MINIMUM_SIZE - 1
+            ),
+            Err(PersonalFileRefusal::BelowMinimumSize)
+        );
+        assert_eq!(
+            personal_file_selectability(
+                home,
+                Path::new("/home/tester/.config/big.bin"),
+                false,
+                ANALYZE_MINIMUM_SIZE
+            ),
+            Err(PersonalFileRefusal::ProtectedLocation)
+        );
+        assert_eq!(
+            personal_file_selectability(
+                home,
+                Path::new("/home/tester/go/pkg/mod/archive.bin"),
+                false,
+                ANALYZE_MINIMUM_SIZE
+            ),
+            Err(PersonalFileRefusal::ProtectedLocation)
+        );
+        assert_eq!(
+            personal_file_selectability(
+                home,
+                Path::new("/somewhere/else/archive.iso"),
+                false,
+                ANALYZE_MINIMUM_SIZE
+            ),
+            Err(PersonalFileRefusal::OutsideHome)
+        );
+        assert_eq!(
+            personal_file_selectability(
+                home,
+                Path::new("/home/tester/Downloads/archive.iso"),
+                false,
+                ANALYZE_MINIMUM_SIZE
+            ),
+            Ok(())
+        );
+    }
+
+    /// Anti-drift check: `is_selectable_personal_file` (the TUI's pre-selection gate) and
+    /// `Executor::validate_personal_file` (the execution-time re-check) must agree on every path
+    /// the UI would offer, or a user could select and confirm removal of a file that execution
+    /// then silently refuses. This exercises real files on disk, since `validate_personal_file`
+    /// stats the path.
+    #[test]
+    fn selectable_paths_are_always_accepted_by_validate_personal_file() {
+        let root = tempdir().unwrap();
+        let home = root.path().to_path_buf();
+        let executor = Executor::new(home.clone());
+        let big = ANALYZE_MINIMUM_SIZE;
+
+        let cases: &[(&str, u64, bool)] = &[
+            ("Downloads/archive.iso", big, true),
+            (".ollama/models/blobs/sha256-abc", big, true),
+            (".local/share/containers/storage/disk.qcow2", big, true),
+            ("go/pkg/mod/archive.bin", big, false),
+            (".ssh/id_rsa_backup", big, false),
+            (".gnupg/secring.gpg", big, false),
+            (".config/app/state.bin", big, false),
+            (".git/objects/pack/big.pack", big, false),
+            ("code/project/.git/objects/pack/big.pack", big, false),
+        ];
+
+        for (relative, size, expected_selectable) in cases {
+            let path = home.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::File::create(&path).unwrap().set_len(*size).unwrap();
+
+            let selectable = is_selectable_personal_file(&home, &path, false, *size);
+            assert_eq!(
+                selectable, *expected_selectable,
+                "unexpected selectability for {relative}"
+            );
+            if selectable {
+                assert!(
+                    executor.validate_personal_file(&path).is_ok(),
+                    "validate_personal_file disagreed with is_selectable_personal_file for {relative}"
+                );
+            } else {
+                // Every denylisted location must be rejected by both functions; sub-threshold
+                // and directory cases are UI-only concerns (see `PersonalFileRefusal`) and are
+                // covered separately above, so this branch only ever hits denylisted paths here.
+                assert!(
+                    executor.validate_personal_file(&path).is_err(),
+                    "protected location {relative} was unexpectedly accepted by validate_personal_file"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1645,5 +1852,80 @@ mod tests {
         // able to resolve the exact same directory that was under the cursor.
         assert_eq!(resolved, Some(PathBuf::from("/root/c")));
         assert!(sorted.iter().any(|item| item.path == Path::new("/root/c")));
+    }
+
+    /// Regression test for the `TopFiles` cursor bug: before this fix, `reconcile_list_state`
+    /// returned early for `TopFiles` on the (false) assumption that background scanning never
+    /// touches `large_files`. In fact `drain_location`'s `ScanUpdate::Large` arm pushes into it
+    /// live, and `visible_large_files()` re-sorts by size descending on every call, so when a
+    /// larger file streamed in after the user had placed the cursor on a smaller one, the row
+    /// order shifted under the still-numeric `list_state` index and `d` would silently delete
+    /// whatever new file now occupied that slot instead of the one the user was looking at.
+    #[test]
+    fn topfiles_cursor_survives_a_larger_file_arriving_after_it_is_placed() {
+        let mut location = Location::new(PathBuf::from("/root"));
+        location.large_files = vec![
+            LargeFile {
+                path: PathBuf::from("/root/a.bin"),
+                size: ANALYZE_MINIMUM_SIZE + 10,
+                modified_unix: None,
+                app_data: false,
+            },
+            LargeFile {
+                path: PathBuf::from("/root/b.bin"),
+                size: ANALYZE_MINIMUM_SIZE + 5,
+                modified_unix: None,
+                app_data: false,
+            },
+        ];
+        // Sorted desc by size: a at index 0, b at index 1. The user has moved the cursor onto
+        // "b", the smaller of the two.
+        location.selected_large_file = Some(PathBuf::from("/root/b.bin"));
+        location.complete = true;
+        location.needs_reorder = false;
+
+        let mut state = AnalyzeState {
+            home: PathBuf::from("/root"),
+            locations: vec![location],
+            mode: AnalyzeMode::TopFiles,
+            list_state: ListState::default().with_selected(Some(1)),
+            selected_files: BTreeMap::new(),
+            pending_delete: BTreeMap::new(),
+            confirming_delete: false,
+            results: None,
+            status: "Ready".into(),
+            filter: String::new(),
+            filtering: false,
+            show_help: false,
+            spinner: 0,
+            history_store: None,
+        };
+
+        // A larger file streams in, exactly like `drain_location` pushing a `ScanUpdate::Large`
+        // during a live scan. It now sorts first, pushing "b.bin" from index 1 to index 2.
+        state.active_mut().large_files.push(LargeFile {
+            path: PathBuf::from("/root/c.bin"),
+            size: ANALYZE_MINIMUM_SIZE + 100,
+            modified_unix: None,
+            app_data: false,
+        });
+
+        state.reconcile_list_state();
+
+        assert_eq!(
+            state.active().selected_large_file.as_deref(),
+            Some(Path::new("/root/b.bin")),
+            "the identity-tracked selection must stay on the originally highlighted file"
+        );
+        assert_eq!(
+            state.list_state.selected(),
+            Some(2),
+            "the numeric cursor must follow \"b.bin\" to its new position"
+        );
+
+        // `d` (via `focused_file`) must resolve to the same file that was highlighted before the
+        // larger file arrived, not whatever now sits at the stale index.
+        let (path, _size) = state.focused_file().expect("b.bin is selectable");
+        assert_eq!(path, PathBuf::from("/root/b.bin"));
     }
 }
