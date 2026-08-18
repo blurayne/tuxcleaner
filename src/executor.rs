@@ -426,6 +426,8 @@ fn is_allowed_command(program: &str, args: &[String], requires_root: bool) -> bo
             | ("journalctl", ["--vacuum-size=200M"], true)
             | ("docker", ["system", "prune", "-f"], false)
             | ("flatpak", ["uninstall", "--unused", "-y"], false)
+            | ("podman", ["system", "prune", "-f"], false)
+            | ("podman", ["system", "prune", "-f"], true)
     ) {
         return true;
     }
@@ -438,6 +440,9 @@ fn is_allowed_command(program: &str, args: &[String], requires_root: bool) -> bo
         ("flatpak", ["uninstall", "--user", "-y", application], false)
         | ("flatpak", ["uninstall", "--system", "-y", application], false) => {
             is_valid_identifier(application)
+        }
+        ("podman", ["--connection", name, "system", "prune", "-f"], false) => {
+            is_valid_identifier(name)
         }
         _ => false,
     }

@@ -1,5 +1,6 @@
 pub mod analyze;
 pub mod cli;
+pub mod containers;
 pub mod distro;
 pub mod executor;
 pub mod history;

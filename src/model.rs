@@ -21,7 +21,7 @@ impl CleanupGroup {
             Self::System => "System & packages",
             Self::User => "User & app caches",
             Self::Dev => "Developer caches",
-            Self::Containers => "Docker & Flatpak",
+            Self::Containers => "Docker, Podman & Flatpak",
         }
     }
 }
