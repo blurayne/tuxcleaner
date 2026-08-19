@@ -57,6 +57,16 @@ pub enum CleanupAction {
     },
     RemovePersonalFile {
         path: PathBuf,
+        /// Whether this removal was authorized through the analyze screen's forcing gestures
+        /// (Shift+D / Shift+Space / `S`), which relax the `ANALYZE_MINIMUM_SIZE` floor, the
+        /// git-repository-root guard, and the protected-location denylist, but never the hard
+        /// home-scope, `..`, or symlink checks in `Executor::validate_personal_file`. See
+        /// `AGENTS.md`, "Intentional divergences from upstream policy", for the authorization.
+        /// `#[serde(default)]` so older JSON records without this field still deserialize
+        /// (defaulting to `false`), per CLAUDE.md's "preserve JSON output compatibility by adding
+        /// fields" rule.
+        #[serde(default)]
+        force: bool,
     },
     Command {
         program: String,
@@ -184,6 +194,22 @@ mod tests {
                 CleanupGroup::Containers,
                 CleanupGroup::Models,
             ]
+        );
+    }
+
+    #[test]
+    fn remove_personal_file_json_without_force_defaults_to_false() {
+        // Older history/JSON records were written before `force` existed. CLAUDE.md requires
+        // preserving JSON output compatibility by adding fields rather than renaming or removing
+        // them, so a record missing `force` entirely must still deserialize, defaulting to false.
+        let legacy = r#"{"type":"remove_personal_file","path":"/home/tester/Downloads/big.iso"}"#;
+        let action: CleanupAction = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            action,
+            CleanupAction::RemovePersonalFile {
+                path: PathBuf::from("/home/tester/Downloads/big.iso"),
+                force: false,
+            }
         );
     }
 

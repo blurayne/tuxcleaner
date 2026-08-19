@@ -561,27 +561,40 @@ pub(super) fn draw_analyze(frame: &mut Frame<'_>, state: &mut AnalyzeState) {
     }
 
     let selected_total: u64 = state.selected_files.values().map(|entry| entry.size).sum();
-    let filter = if state.filtering {
-        format!("Filter: {}▌", state.filter)
+    let status_color = match state.status_severity {
+        StatusSeverity::Info => None,
+        StatusSeverity::Warning => Some(Color::Yellow),
+        StatusSeverity::Error => Some(Color::Red),
+    };
+    let filter_line = if state.filtering {
+        Line::from(format!("Filter: {}▌", state.filter))
     } else if !state.filter.is_empty() {
-        format!("Filter: {}", state.filter)
+        Line::from(format!("Filter: {}", state.filter))
     } else if state.selected_files.is_empty() {
-        state.status.clone()
+        match status_color {
+            Some(color) => Line::from(Span::styled(
+                state.status.clone(),
+                Style::default().fg(color),
+            )),
+            None => Line::from(state.status.clone()),
+        }
     } else {
-        format!(
+        Line::from(format!(
             "{} selected · {}",
             state.selected_files.len(),
             format_bytes(selected_total)
-        )
+        ))
     };
-    let mut footer = vec![Line::from(filter)];
+    let mut footer = vec![filter_line];
     if state.filtering {
         footer.push(Line::from("Type to filter   Enter: apply   Esc: clear"));
     } else {
         footer.push(Line::from(
             "↑/↓ move   Enter open   Space select   d Delete   / filter",
         ));
-        footer.push(Line::from("t top   r refresh   Esc back   ? help   q quit"));
+        footer.push(Line::from(
+            "t top   r refresh   Esc back   ? help   q quit   Shift+D/S force",
+        ));
     }
     frame.render_widget(
         Paragraph::new(footer)
@@ -704,9 +717,41 @@ pub(super) fn personal_file_selectability(
     is_dir: bool,
     size: u64,
 ) -> Result<(), PersonalFileRefusal> {
+    personal_file_selectability_impl(home, path, is_dir, size, false)
+}
+
+/// The forced counterpart to `personal_file_selectability`, used by the analyze screen's forcing
+/// gestures (Shift+D, Shift+Space, `S`). Skips the `ANALYZE_MINIMUM_SIZE` floor, the
+/// protected-location denylist, and the git-repository-root guard, but shares the hard
+/// `OutsideHome` check with the unforced path through `personal_file_selectability_impl`, so a
+/// path outside home is refused exactly the same way whether forced or not. The owner of this
+/// fork has explicitly authorized this relaxation for the forced analyze path only; see
+/// `AGENTS.md`, "Intentional divergences from upstream policy".
+pub(super) fn personal_file_selectability_forced(
+    home: &Path,
+    path: &Path,
+    is_dir: bool,
+    size: u64,
+) -> Result<(), PersonalFileRefusal> {
+    personal_file_selectability_impl(home, path, is_dir, size, true)
+}
+
+/// Shared core of `personal_file_selectability` and `personal_file_selectability_forced`. The
+/// `OutsideHome` check runs unconditionally, before and independently of `force`, so it can never
+/// become skippable by a future change to the policy checks below.
+fn personal_file_selectability_impl(
+    home: &Path,
+    path: &Path,
+    is_dir: bool,
+    size: u64,
+    force: bool,
+) -> Result<(), PersonalFileRefusal> {
     let Ok(relative) = path.strip_prefix(home) else {
         return Err(PersonalFileRefusal::OutsideHome);
     };
+    if force {
+        return Ok(());
+    }
     if crate::executor::is_denylisted_personal_file_path(relative) {
         return Err(PersonalFileRefusal::ProtectedLocation);
     }
@@ -758,6 +803,7 @@ pub(super) fn personal_file_refusal_tag(refusal: PersonalFileRefusal) -> String 
 pub(super) fn draw_delete_confirmation(frame: &mut Frame<'_>, state: &AnalyzeState) {
     let total: u64 = state.pending_delete.values().map(|entry| entry.size).sum();
     let has_directory = state.pending_delete.values().any(|entry| entry.is_dir);
+    let forced = state.pending_delete.values().any(|entry| entry.force);
     let detail = if state.pending_delete.len() == 1 {
         state
             .pending_delete
@@ -768,14 +814,39 @@ pub(super) fn draw_delete_confirmation(frame: &mut Frame<'_>, state: &AnalyzeSta
     } else {
         format!("{} selected files", state.pending_delete.len())
     };
+    // When a force gesture built this pending set, name exactly which guard was overridden for
+    // each affected path. Recomputed here from the same `personal_file_selectability` the
+    // unforced path uses (rather than stored at selection time), so the reason shown can never
+    // drift from what the unforced check would actually say for that exact path.
+    let overrides: Vec<String> = state
+        .pending_delete
+        .iter()
+        .filter(|(_, entry)| entry.force)
+        .filter_map(|(path, entry)| {
+            personal_file_selectability(&state.home, path, entry.is_dir, entry.size)
+                .err()
+                .map(|refusal| format!("overriding: {}", personal_file_refusal_tag(refusal)))
+        })
+        .collect();
+    let heading = if forced {
+        "FORCE removal: safety checks bypassed"
+    } else {
+        "Permanently remove?"
+    };
     let mut text = vec![
         Line::from(Span::styled(
-            "Permanently remove?",
+            heading,
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(detail),
     ];
+    for line in &overrides {
+        text.push(Line::from(Span::styled(
+            line.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
     if has_directory {
         text.push(Line::from(Span::styled(
             "This is a directory: it and all of its contents will be permanently removed.",
@@ -785,12 +856,13 @@ pub(super) fn draw_delete_confirmation(frame: &mut Frame<'_>, state: &AnalyzeSta
     text.push(Line::from(format!("Total: {}", format_bytes(total))));
     text.push(Line::from(""));
     text.push(Line::from("Enter: confirm   Esc: cancel"));
-    let height = if has_directory { 11 } else { 9 };
+    let height = (if has_directory { 11 } else { 9 }) + overrides.len() as u16;
     draw_overlay(frame, " Confirm removal ", text, 70, height);
 }
 
 pub(super) fn draw_results(frame: &mut Frame<'_>, results: &[ActionResult]) {
     let succeeded = results.iter().filter(|result| result.success).count();
+    let all_succeeded = succeeded == results.len();
     let total: u64 = results
         .iter()
         .filter(|result| result.success)
@@ -800,10 +872,10 @@ pub(super) fn draw_results(frame: &mut Frame<'_>, results: &[ActionResult]) {
         Line::from(Span::styled(
             format!("{succeeded}/{} permanently removed", results.len()),
             Style::default()
-                .fg(if succeeded == results.len() {
+                .fg(if all_succeeded {
                     Color::Green
                 } else {
-                    Color::Yellow
+                    Color::Red
                 })
                 .add_modifier(Modifier::BOLD),
         )),
@@ -811,7 +883,10 @@ pub(super) fn draw_results(frame: &mut Frame<'_>, results: &[ActionResult]) {
         Line::from(""),
     ];
     for result in results.iter().filter(|result| !result.success).take(3) {
-        text.push(Line::from(format!("Failed: {}", result.message)));
+        text.push(Line::from(Span::styled(
+            format!("Failed: {}", result.message),
+            Style::default().fg(Color::Red),
+        )));
     }
     text.push(Line::from("Enter or Esc: continue"));
     draw_overlay(frame, " Result ", text, 70, 9);
@@ -823,6 +898,14 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         Line::from("Enter or →     Open directory"),
         Line::from("Space          Select a personal file"),
         Line::from("d/Delete       Permanently remove selection"),
+        Line::from(Span::styled(
+            "Shift+Space, S Force-select (bypasses size, git, protected checks)",
+            Style::default().fg(Color::Red),
+        )),
+        Line::from(Span::styled(
+            "Shift+D        Force-delete (bypasses size, git, protected checks)",
+            Style::default().fg(Color::Red),
+        )),
         Line::from("/              Filter current list"),
         Line::from("t              Toggle top large files"),
         Line::from("r              Refresh current location"),
@@ -831,7 +914,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         Line::from(""),
         Line::from("Press ? or Esc to close"),
     ];
-    draw_overlay(frame, " Analyze help ", text, 66, 15);
+    draw_overlay(frame, " Analyze help ", text, 74, 17);
 }
 
 pub(super) fn draw_overlay(

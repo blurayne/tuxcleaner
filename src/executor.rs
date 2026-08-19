@@ -128,16 +128,19 @@ impl<R: CommandRunner> Executor<R> {
                     }
                 })
                 .map_err(|error| error.to_string()),
-            CleanupAction::RemovePersonalFile { path } => self
-                .validate_personal_file(path)
-                .and_then(|()| {
-                    if dry_run || !path.exists() {
-                        Ok(())
-                    } else {
-                        remove_entry(path)
-                    }
-                })
-                .map_err(|error| error.to_string()),
+            CleanupAction::RemovePersonalFile { path, force } => (if *force {
+                self.validate_personal_file_forced(path)
+            } else {
+                self.validate_personal_file(path)
+            })
+            .and_then(|()| {
+                if dry_run || !path.exists() {
+                    Ok(())
+                } else {
+                    remove_entry(path)
+                }
+            })
+            .map_err(|error| error.to_string()),
             CleanupAction::Command {
                 program,
                 args,
@@ -362,7 +365,37 @@ impl<R: CommandRunner> Executor<R> {
         Ok(())
     }
 
+    /// The normal, unforced re-check applied to every `RemovePersonalFile` action: every hard
+    /// check plus the full policy check (protected-location denylist and git-repository-root
+    /// guard).
     pub fn validate_personal_file(&self, path: &Path) -> Result<(), ExecutionError> {
+        self.validate_personal_file_impl(path, false)
+    }
+
+    /// The forced re-check applied when the analyze screen's forcing gestures (Shift+D,
+    /// Shift+Space, `S`) were used to select or delete `path`. Skips the protected-location
+    /// denylist and the git-repository-root guard, but shares every hard check with
+    /// `validate_personal_file` through `validate_personal_file_impl`, so those checks are
+    /// structurally impossible to bypass here.
+    ///
+    /// The repository owner has explicitly authorized this relaxation for the forced analyze
+    /// path only (see `AGENTS.md`, "Intentional divergences from upstream policy", entry dated
+    /// 2026-08-19). Bypassing the hard checks below (home-scope, `..`, symlinks) could delete
+    /// arbitrary system paths, which is categorically different from letting the owner delete
+    /// their own oversized config directory, so those checks are never made conditional on
+    /// `force` -- only the two policy checks below are.
+    pub fn validate_personal_file_forced(&self, path: &Path) -> Result<(), ExecutionError> {
+        self.validate_personal_file_impl(path, true)
+    }
+
+    /// Shared core of `validate_personal_file` and `validate_personal_file_forced`. The hard
+    /// checks (absolute path, not `/`, not home itself, under home, no `..` component, no
+    /// symlink ancestor, not a symlink itself) run unconditionally, before and independently of
+    /// the `force` flag, so a future change to the policy checks below can never accidentally
+    /// weaken them. Only the protected-location denylist and the git-repository-root guard are
+    /// gated on `force`.
+    fn validate_personal_file_impl(&self, path: &Path, force: bool) -> Result<(), ExecutionError> {
+        // Hard checks: always enforced, regardless of `force`.
         if !path.is_absolute()
             || path == Path::new("/")
             || path == self.home
@@ -376,9 +409,14 @@ impl<R: CommandRunner> Executor<R> {
         let relative = path
             .strip_prefix(&self.home)
             .map_err(|_| ExecutionError::UnsafePath(path.to_path_buf()))?;
-        if is_denylisted_personal_file_path(relative) {
+
+        // Policy checks: relaxed only when `force` is true and only for the owner's own files
+        // under home, never for the hard checks above or the symlink checks below.
+        if !force && is_denylisted_personal_file_path(relative) {
             return Err(ExecutionError::UnsafePath(path.to_path_buf()));
         }
+
+        // Hard check: never skippable, forced or not.
         self.ensure_no_symlink_ancestors(path)?;
         let metadata = fs::symlink_metadata(path).map_err(|source| ExecutionError::Io {
             path: path.to_path_buf(),
@@ -387,8 +425,10 @@ impl<R: CommandRunner> Executor<R> {
         if metadata.file_type().is_symlink() {
             return Err(ExecutionError::UnsafePath(path.to_path_buf()));
         }
+
         if metadata.is_dir() {
-            if is_git_repository_root(path) {
+            // Policy check: relaxed only when `force` is true.
+            if !force && is_git_repository_root(path) {
                 return Err(ExecutionError::UnsafePath(path.to_path_buf()));
             }
         } else if !metadata.is_file() {
@@ -936,7 +976,10 @@ mod tests {
             label: "archive.iso".into(),
             estimated_bytes: 4,
             risk: Risk::Explicit,
-            action: CleanupAction::RemovePersonalFile { path: file.clone() },
+            action: CleanupAction::RemovePersonalFile {
+                path: file.clone(),
+                force: false,
+            },
         };
 
         let result = executor.execute(&item, false);
@@ -1009,7 +1052,10 @@ mod tests {
             label: "recordings".into(),
             estimated_bytes: 13,
             risk: Risk::Explicit,
-            action: CleanupAction::RemovePersonalFile { path: dir.clone() },
+            action: CleanupAction::RemovePersonalFile {
+                path: dir.clone(),
+                force: false,
+            },
         };
         let result = executor.execute(&item, false);
         assert!(result.success, "{}", result.message);
@@ -1076,7 +1122,10 @@ mod tests {
             label: "linked-large-dir".into(),
             estimated_bytes: 4,
             risk: Risk::Explicit,
-            action: CleanupAction::RemovePersonalFile { path: link.clone() },
+            action: CleanupAction::RemovePersonalFile {
+                path: link.clone(),
+                force: false,
+            },
         };
         let result = executor.execute(&item, false);
         assert!(!result.success);
@@ -1115,6 +1164,144 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         assert!(executor.validate_personal_file(&nested).is_err());
         assert!(ancestor_target.exists());
+    }
+
+    #[test]
+    fn forced_validation_accepts_each_protected_denylist_location() {
+        // Force overrides the protected-location denylist for `.ssh`, `.gnupg`, `.config`,
+        // `.git`, and `go/pkg`, but only when explicitly forced; the unforced check still
+        // refuses them (see `rejects_protected_personal_directory_locations` above, which
+        // exercises the same set unforced).
+        let root = tempdir().unwrap();
+        let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
+        for relative in [".ssh", ".gnupg", ".config", ".git", "go/pkg"] {
+            let dir = root.path().join(relative);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("data.bin"), vec![0u8; 8]).unwrap();
+            assert!(
+                executor.validate_personal_file(&dir).is_err(),
+                "expected unforced validation to still reject {relative}"
+            );
+            assert!(
+                executor.validate_personal_file_forced(&dir).is_ok(),
+                "expected forced validation to accept {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn forced_validation_accepts_a_git_repository_root() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("code/project");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::write(project.join("README.md"), vec![0u8; 8]).unwrap();
+        let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
+
+        assert!(executor.validate_personal_file(&project).is_err());
+        assert!(executor.validate_personal_file_forced(&project).is_ok());
+    }
+
+    #[test]
+    fn forced_validation_still_refuses_every_hard_check() {
+        // The most important test in this set: force must never override the path being outside
+        // home, the home directory itself, a `..` component, a symlink, or a symlinked ancestor.
+        // Each rule gets its own case rather than one combined case.
+        let root = tempdir().unwrap();
+        let home = root.path().to_path_buf();
+        let executor = Executor::with_runner(home.clone(), SuccessfulRunner);
+
+        // Outside home.
+        assert!(
+            executor
+                .validate_personal_file_forced(Path::new("/etc/passwd"))
+                .is_err()
+        );
+
+        // The home directory itself.
+        assert!(executor.validate_personal_file_forced(&home).is_err());
+
+        // A `..` component.
+        let escaping = home.join("Videos/../../etc");
+        assert!(executor.validate_personal_file_forced(&escaping).is_err());
+
+        // A symlink itself.
+        let real_dir = root.path().join("elsewhere-dir");
+        fs::create_dir_all(&real_dir).unwrap();
+        fs::write(real_dir.join("f.bin"), vec![0u8; 8]).unwrap();
+        let link = home.join("linked-dir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+        assert!(executor.validate_personal_file_forced(&link).is_err());
+        assert!(real_dir.exists());
+
+        // A symlinked ancestor.
+        let ancestor_target = root.path().join("ancestor-target");
+        fs::create_dir_all(&ancestor_target).unwrap();
+        let ancestor_link = home.join("ancestor-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&ancestor_target, &ancestor_link).unwrap();
+        let nested = ancestor_link.join("nested-dir");
+        fs::create_dir_all(&nested).unwrap();
+        assert!(executor.validate_personal_file_forced(&nested).is_err());
+        assert!(ancestor_target.exists());
+    }
+
+    #[test]
+    fn forced_symlinked_protected_directory_is_still_refused_and_target_survives() {
+        // A symlink pointing at a large protected directory must be refused even with force, and
+        // the real directory it points at must still exist afterwards.
+        let root = tempdir().unwrap();
+        let real_target = root.path().join("real-protected-dir");
+        fs::create_dir_all(&real_target).unwrap();
+        fs::write(real_target.join("payload.bin"), b"data").unwrap();
+        let link = root.path().join(".ssh");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_target, &link).unwrap();
+        let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
+
+        assert!(executor.validate_personal_file_forced(&link).is_err());
+
+        let item = CleanupItem {
+            id: "large-file:test".into(),
+            group: CleanupGroup::User,
+            label: "linked-protected-dir".into(),
+            estimated_bytes: 4,
+            risk: Risk::Explicit,
+            action: CleanupAction::RemovePersonalFile {
+                path: link.clone(),
+                force: true,
+            },
+        };
+        let result = executor.execute(&item, false);
+        assert!(!result.success);
+        assert!(real_target.exists(), "the symlink target must survive");
+        assert!(real_target.join("payload.bin").exists());
+    }
+
+    #[test]
+    fn forced_execution_removes_a_protected_location_when_authorized() {
+        // End-to-end: `force` flows from `CleanupAction::RemovePersonalFile.force` through
+        // `Executor::execute` and actually removes a path the unforced path would refuse.
+        let root = tempdir().unwrap();
+        let dir = root.path().join(".config/oversized-app-state");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("state.bin"), vec![0u8; 8]).unwrap();
+        let executor = Executor::with_runner(root.path().to_path_buf(), SuccessfulRunner);
+
+        let item = CleanupItem {
+            id: "large-file:test".into(),
+            group: CleanupGroup::User,
+            label: "oversized-app-state".into(),
+            estimated_bytes: 8,
+            risk: Risk::Explicit,
+            action: CleanupAction::RemovePersonalFile {
+                path: dir.clone(),
+                force: true,
+            },
+        };
+        let result = executor.execute(&item, false);
+        assert!(result.success, "{}", result.message);
+        assert!(!dir.exists());
     }
 
     fn application(package: &str) -> Application {
