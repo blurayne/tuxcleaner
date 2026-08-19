@@ -68,7 +68,7 @@ pub(super) fn run_analyze(args: AnalyzeArgs) -> Result<()> {
     let executor = Executor::new(home);
     let results: Vec<_> = selected
         .iter()
-        .map(|file| executor.execute(&file.cleanup_item(), args.dry_run))
+        .map(|file| executor.execute(&file.cleanup_item(false), args.dry_run))
         .collect();
     record_history(&distro.name, "large-file-cleanup", &results);
     if args.json {

@@ -30,7 +30,9 @@ pub struct LargeFile {
 }
 
 impl LargeFile {
-    pub fn cleanup_item(&self) -> CleanupItem {
+    /// `force` is passed straight through to `CleanupAction::RemovePersonalFile.force`; see that
+    /// field's doc comment for exactly what it relaxes.
+    pub fn cleanup_item(&self, force: bool) -> CleanupItem {
         CleanupItem {
             id: format!("large-file:{}", self.path.display()),
             group: CleanupGroup::User,
@@ -39,6 +41,7 @@ impl LargeFile {
             risk: Risk::Explicit,
             action: CleanupAction::RemovePersonalFile {
                 path: self.path.clone(),
+                force,
             },
         }
     }

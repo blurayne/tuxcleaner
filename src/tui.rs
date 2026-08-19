@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -107,6 +110,14 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        // Popped before leaving the alternate screen, mirroring the push order in
+        // `interactive_app` (push happens after `EnterAlternateScreen`). Runs unconditionally, on
+        // every teardown path including a panic unwinding through this scope, so the terminal is
+        // never left with the kitty keyboard protocol's DISAMBIGUATE_ESCAPE_CODES flag still
+        // active. A terminal that never understood the push in the first place silently ignores
+        // this pop too; both directions of the exchange are one-way private-mode escape
+        // sequences that unsupported terminals are specified to discard.
+        let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
         let _ = disable_raw_mode();
         let _ = execute!(stdout(), LeaveAlternateScreen);
     }
@@ -434,6 +445,29 @@ fn drain_location(location: &mut Location) {
 struct PendingRemoval {
     size: u64,
     is_dir: bool,
+    /// Whether this specific path was selected or is being deleted through one of the forcing
+    /// gestures (Shift+D, Shift+Space, `S`), and so should be validated and executed with
+    /// `Executor::validate_personal_file_forced` / `CleanupAction::RemovePersonalFile.force`
+    /// rather than the normal, unforced path.
+    force: bool,
+}
+
+/// Severity of `AnalyzeState::status`, driving how the status line and results overlay are
+/// colored. Kept as a separate type (rather than inline `Color` values scattered across every
+/// call site) so `AnalyzeState::set_status` can be the single place that ties a message to its
+/// color, and so the renderer in `src/tui/view.rs` has one small, exhaustive match instead of
+/// duplicating this policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StatusSeverity {
+    /// Routine progress or confirmation messages ("Scanning disk usage...", selection summaries).
+    /// Rendered in the terminal's default color.
+    Info,
+    /// A refusal or guard message explaining why an action did not happen (below the size floor,
+    /// not selectable, nothing selected). Rendered in yellow.
+    Warning,
+    /// A genuine failure, such as a removal that returned an error from the executor. Rendered
+    /// in red.
+    Error,
 }
 
 struct AnalyzeState {
@@ -447,6 +481,9 @@ struct AnalyzeState {
     confirming_delete: bool,
     results: Option<Vec<ActionResult>>,
     status: String,
+    /// Always set together with `status` through `set_status`, never assigned on its own, so it
+    /// can never go stale and describe a different message than the one currently displayed.
+    status_severity: StatusSeverity,
     filter: String,
     filtering: bool,
     show_help: bool,
@@ -539,7 +576,25 @@ impl App {
                     KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                         analyze.enter_selected()
                     }
+                    // Most terminals send an identical byte sequence for Space and Shift+Space,
+                    // so crossterm normally reports no SHIFT modifier for either and this arm
+                    // alone would never see it. `interactive_app` requests the kitty keyboard
+                    // protocol's DISAMBIGUATE_ESCAPE_CODES flag specifically so a supporting
+                    // terminal attaches `KeyModifiers::SHIFT` to this same `Char(' ')` event
+                    // instead of reporting a different code entirely; matching on the modifier
+                    // here (rather than a second, separate `KeyCode` pattern) is what picks that
+                    // up. On a terminal that does not support the protocol, `key.modifiers` is
+                    // simply empty here and plain Space keeps working exactly as before.
+                    KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        analyze.toggle_selection_forced()
+                    }
                     KeyCode::Char(' ') => analyze.toggle_selection(),
+                    // Portable force-select alias: Shift+Space cannot be relied on outside the
+                    // kitty protocol, so `S` always works, unconditionally, on every terminal.
+                    KeyCode::Char('S') => analyze.toggle_selection_forced(),
+                    // Shift+D: portable everywhere (`KeyCode::Char('D')` does not depend on the
+                    // keyboard enhancement flags at all), so no terminal caveat applies here.
+                    KeyCode::Char('D') => analyze.begin_delete_forced(),
                     KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace => {
                         analyze.begin_delete()
                     }
@@ -863,12 +918,21 @@ impl AnalyzeState {
             confirming_delete: false,
             results: None,
             status: "Scanning disk usage...".into(),
+            status_severity: StatusSeverity::Info,
             filter: String::new(),
             filtering: false,
             show_help: false,
             spinner: 0,
             history_store: HistoryStore::system_default().ok(),
         }
+    }
+
+    /// The only place `status` and `status_severity` are assigned; every other method in this
+    /// impl block goes through this setter instead of writing either field directly, so the two
+    /// can never drift apart and describe different messages.
+    fn set_status(&mut self, message: impl Into<String>, severity: StatusSeverity) {
+        self.status = message.into();
+        self.status_severity = severity;
     }
 
     fn active(&self) -> &Location {
@@ -1071,7 +1135,10 @@ impl AnalyzeState {
             return;
         };
         if !entry.is_dir {
-            self.status = "Use Space to select the file, then d to remove it".into();
+            self.set_status(
+                "Use Space to select the file, then d to remove it",
+                StatusSeverity::Warning,
+            );
             return;
         }
         self.push_location(entry.path);
@@ -1086,7 +1153,7 @@ impl AnalyzeState {
         self.filtering = false;
         self.selected_files.clear();
         self.list_state = ListState::default();
-        self.status = "Scanning disk usage...".into();
+        self.set_status("Scanning disk usage...", StatusSeverity::Info);
     }
 
     /// Keeps at most `ANALYZE_LIVE_SCAN_CAP` locations with a live scan handle at once, evicting
@@ -1107,24 +1174,36 @@ impl AnalyzeState {
         }
     }
 
-    fn focused_file(&self) -> Result<(PathBuf, PendingRemoval), FocusRefusal> {
+    /// Resolves the row under the cursor to a removable path, if any. `force` selects which of
+    /// `personal_file_selectability` / `personal_file_selectability_forced` gates the row; the
+    /// resulting `PendingRemoval.force` records the same flag, so the eventual removal is
+    /// validated and executed the same way it was offered here.
+    fn focused_file_impl(&self, force: bool) -> Result<(PathBuf, PendingRemoval), FocusRefusal> {
         let index = self
             .list_state
             .selected()
             .ok_or(FocusRefusal::NoSelection)?;
+        let selectability_of = |path: &Path, is_dir: bool, size: u64| {
+            if force {
+                personal_file_selectability_forced(&self.home, path, is_dir, size)
+            } else {
+                personal_file_selectability(&self.home, path, is_dir, size)
+            }
+        };
         match self.mode {
             AnalyzeMode::Browse => {
                 let entry = *self
                     .visible_entries()
                     .get(index)
                     .ok_or(FocusRefusal::NoSelection)?;
-                personal_file_selectability(&self.home, &entry.path, entry.is_dir, entry.size)
+                selectability_of(&entry.path, entry.is_dir, entry.size)
                     .map(|()| {
                         (
                             entry.path.clone(),
                             PendingRemoval {
                                 size: entry.size,
                                 is_dir: entry.is_dir,
+                                force,
                             },
                         )
                     })
@@ -1135,13 +1214,14 @@ impl AnalyzeState {
                     .visible_large_files()
                     .get(index)
                     .ok_or(FocusRefusal::NoSelection)?;
-                personal_file_selectability(&self.home, &file.path, false, file.size)
+                selectability_of(&file.path, false, file.size)
                     .map(|()| {
                         (
                             file.path.clone(),
                             PendingRemoval {
                                 size: file.size,
                                 is_dir: false,
+                                force,
                             },
                         )
                     })
@@ -1150,12 +1230,30 @@ impl AnalyzeState {
         }
     }
 
-    fn toggle_selection(&mut self) {
+    fn focused_file(&self) -> Result<(PathBuf, PendingRemoval), FocusRefusal> {
+        self.focused_file_impl(false)
+    }
+
+    /// The forced counterpart to `focused_file`, used by the analyze screen's forcing gestures
+    /// (Shift+Space, `S`, and Shift+D when nothing is already selected).
+    fn focused_file_forced(&self) -> Result<(PathBuf, PendingRemoval), FocusRefusal> {
+        self.focused_file_impl(true)
+    }
+
+    fn toggle_selection_impl(&mut self, force: bool) {
         if !self.active_has_data() {
-            self.status = "Selection is available once items appear".into();
+            self.set_status(
+                "Selection is available once items appear",
+                StatusSeverity::Warning,
+            );
             return;
         }
-        match self.focused_file() {
+        let focused = if force {
+            self.focused_file_forced()
+        } else {
+            self.focused_file()
+        };
+        match focused {
             Ok((path, entry)) => {
                 if self.selected_files.remove(&path).is_none() {
                     self.selected_files.insert(path, entry);
@@ -1163,35 +1261,87 @@ impl AnalyzeState {
                 self.update_selection_status();
             }
             Err(FocusRefusal::NoSelection) => {
-                self.status = "Nothing is selected".into();
+                self.set_status("Nothing is selected", StatusSeverity::Warning);
             }
             Err(FocusRefusal::NotSelectable(refusal)) => {
-                self.status = personal_file_refusal_message(refusal);
+                self.set_status(
+                    personal_file_refusal_message(refusal),
+                    StatusSeverity::Warning,
+                );
             }
         }
     }
 
-    fn begin_delete(&mut self) {
+    fn toggle_selection(&mut self) {
+        self.toggle_selection_impl(false);
+    }
+
+    /// Force-select (Shift+Space or `S`): like `toggle_selection`, but bypasses the size floor,
+    /// the protected-location denylist, and the git-repository-root guard for the row under the
+    /// cursor. Never bypasses the row being outside home, since `personal_file_selectability`
+    /// itself never relaxes that check regardless of `force` (see `AGENTS.md`).
+    fn toggle_selection_forced(&mut self) {
+        self.toggle_selection_impl(true);
+    }
+
+    fn begin_delete_impl(&mut self, force: bool) {
         if !self.active_has_data() {
-            self.status = "Removal is available once items appear".into();
+            self.set_status(
+                "Removal is available once items appear",
+                StatusSeverity::Warning,
+            );
             return;
         }
         self.pending_delete = if self.selected_files.is_empty() {
-            self.focused_file().ok().into_iter().collect()
+            let focused = if force {
+                self.focused_file_forced()
+            } else {
+                self.focused_file()
+            };
+            focused.ok().into_iter().collect()
+        } else if force {
+            // Force-delete escalates every already-selected entry, so Shift+D reliably removes
+            // the whole batch even if some entries were only ever reachable through force-select.
+            // This is harmless for an entry that was already selectable unforced: recomputing its
+            // reason at confirmation time (see `draw_delete_confirmation`) finds nothing to
+            // report as overridden.
+            self.selected_files
+                .iter()
+                .map(|(path, entry)| {
+                    (
+                        path.clone(),
+                        PendingRemoval {
+                            force: true,
+                            ..*entry
+                        },
+                    )
+                })
+                .collect()
         } else {
             self.selected_files.clone()
         };
         if self.pending_delete.is_empty() {
-            self.status = "Select a personal file first".into();
+            self.set_status("Select a personal file first", StatusSeverity::Warning);
             return;
         }
         self.confirming_delete = true;
     }
 
+    fn begin_delete(&mut self) {
+        self.begin_delete_impl(false);
+    }
+
+    /// Force-delete (Shift+D): behaves like `begin_delete`, but targets rows the normal rules
+    /// refuse. The confirmation dialog (`draw_delete_confirmation`) is still shown -- forcing
+    /// never skips the last confirmation step.
+    fn begin_delete_forced(&mut self) {
+        self.begin_delete_impl(true);
+    }
+
     fn cancel_delete(&mut self) {
         self.confirming_delete = false;
         self.pending_delete.clear();
-        self.status = "Removal cancelled".into();
+        self.set_status("Removal cancelled", StatusSeverity::Info);
     }
 
     fn confirm_delete(&mut self) {
@@ -1199,15 +1349,17 @@ impl AnalyzeState {
         let results: Vec<_> = self
             .pending_delete
             .iter()
-            .map(|(path, entry)| LargeFile {
-                path: path.clone(),
-                size: entry.size,
-                modified_unix: None,
-                app_data: false,
+            .map(|(path, entry)| {
+                let file = LargeFile {
+                    path: path.clone(),
+                    size: entry.size,
+                    modified_unix: None,
+                    app_data: false,
+                };
+                executor.execute(&file.cleanup_item(entry.force), false)
             })
-            .map(|file| file.cleanup_item())
-            .map(|item| executor.execute(&item, false))
             .collect();
+        let failed = results.iter().filter(|result| !result.success).count();
         let distribution = Distribution::detect()
             .map(|value| value.name)
             .unwrap_or_else(|_| "Linux".into());
@@ -1225,20 +1377,30 @@ impl AnalyzeState {
         self.results = Some(results);
         self.active_mut().start_scan();
         self.list_state = ListState::default();
-        self.status = "Scanning disk usage...".into();
+        if failed > 0 {
+            self.set_status(format!("{failed} removal(s) failed"), StatusSeverity::Error);
+        } else {
+            self.set_status("Scanning disk usage...", StatusSeverity::Info);
+        }
     }
 
     fn update_selection_status(&mut self) {
         let total: u64 = self.selected_files.values().map(|entry| entry.size).sum();
-        self.status = if self.selected_files.is_empty() {
-            format!("Scanned {}", format_bytes(self.active().total_size))
+        if self.selected_files.is_empty() {
+            self.set_status(
+                format!("Scanned {}", format_bytes(self.active().total_size)),
+                StatusSeverity::Info,
+            );
         } else {
-            format!(
-                "{} selected, {}",
-                self.selected_files.len(),
-                format_bytes(total)
-            )
-        };
+            self.set_status(
+                format!(
+                    "{} selected, {}",
+                    self.selected_files.len(),
+                    format_bytes(total)
+                ),
+                StatusSeverity::Info,
+            );
+        }
     }
 
     fn toggle_mode(&mut self) {
@@ -1254,17 +1416,21 @@ impl AnalyzeState {
         self.selected_files.clear();
         self.list_state = ListState::default();
         self.select_first_if_available(self.visible_len());
-        self.status = match self.mode {
-            AnalyzeMode::Browse => "Directory explorer".into(),
-            AnalyzeMode::TopFiles => "Largest files in this location".into(),
+        let message = match self.mode {
+            AnalyzeMode::Browse => "Directory explorer",
+            AnalyzeMode::TopFiles => "Largest files in this location",
         };
+        self.set_status(message, StatusSeverity::Info);
     }
 
     fn begin_filter(&mut self) {
         if self.active_has_data() {
             self.filtering = true;
             self.selected_files.clear();
-            self.status = "Type to filter, Enter to apply, Esc to clear".into();
+            self.set_status(
+                "Type to filter, Enter to apply, Esc to clear",
+                StatusSeverity::Info,
+            );
         }
     }
 
@@ -1306,7 +1472,7 @@ impl AnalyzeState {
             self.list_state = ListState::default();
             self.active_mut().reorder();
             self.reconcile_list_state();
-            self.status = "Returned to previous location".into();
+            self.set_status("Returned to previous location", StatusSeverity::Info);
             return false;
         }
         true
@@ -1314,7 +1480,7 @@ impl AnalyzeState {
 
     fn refresh(&mut self) {
         if self.active().scan.is_some() {
-            self.status = "A scan is already in progress".into();
+            self.set_status("A scan is already in progress", StatusSeverity::Warning);
             return;
         }
         self.filter.clear();
@@ -1322,7 +1488,7 @@ impl AnalyzeState {
         self.selected_files.clear();
         self.active_mut().start_scan();
         self.list_state = ListState::default();
-        self.status = "Scanning disk usage...".into();
+        self.set_status("Scanning disk usage...", StatusSeverity::Info);
     }
 
     fn render_items(&self) -> Vec<ListItem<'static>> {
@@ -1368,7 +1534,17 @@ pub fn interactive_app() -> Result<()> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     let home = std::fs::canonicalize(&home).unwrap_or(home);
     enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen)?;
+    // Requesting DISAMBIGUATE_ESCAPE_CODES is what lets a supporting terminal report Shift+Space
+    // as `Char(' ')` with `KeyModifiers::SHIFT` instead of an identical byte sequence to plain
+    // Space (see the Space handling in `handle_key`, below). A terminal that does not implement
+    // the kitty keyboard protocol is specified to ignore an unrecognized private-mode escape
+    // sequence, so this is safe to send unconditionally rather than probing for support first;
+    // `TerminalGuard::drop` pops it again on every teardown path.
+    execute!(
+        stdout(),
+        EnterAlternateScreen,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
     let _guard = TerminalGuard;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -1404,6 +1580,10 @@ pub fn interactive_app() -> Result<()> {
 
 fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
     terminal.show_cursor()?;
+    // Popped before leaving the alternate screen for the sudo prompt, matching
+    // `TerminalGuard::drop`'s ordering, so the terminal is not left in the enhanced keyboard mode
+    // while showing an ordinary password prompt outside TuxCleaner's own input handling.
+    execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, Show)?;
     println!();
@@ -1415,7 +1595,12 @@ fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) 
 
 fn resume_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
     enable_raw_mode()?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen, Hide)?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        Hide,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
     Ok(())
 }
 
@@ -1489,6 +1674,7 @@ mod tests {
             confirming_delete: false,
             results: None,
             status: "Ready".into(),
+            status_severity: StatusSeverity::Info,
             filter: String::new(),
             filtering: false,
             show_help: false,
@@ -1501,12 +1687,21 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn shift_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
     /// Test-only convenience wrapper around `personal_file_selectability`, mirroring what used
     /// to be the standalone `is_selectable_personal_file` helper. Production code now goes
     /// through `personal_file_selectability` directly so it can render the specific refusal
     /// reason inline (see `append_refusal_tag`), rather than collapsing it to a bool first.
     fn selectable(home: &Path, path: &Path, is_dir: bool, size: u64) -> bool {
         personal_file_selectability(home, path, is_dir, size).is_ok()
+    }
+
+    /// The forced counterpart to `selectable`, wrapping `personal_file_selectability_forced`.
+    fn selectable_forced(home: &Path, path: &Path, is_dir: bool, size: u64) -> bool {
+        personal_file_selectability_forced(home, path, is_dir, size).is_ok()
     }
 
     #[test]
@@ -1747,6 +1942,92 @@ mod tests {
         }
     }
 
+    /// Forced selection (Shift+Space / `S`) succeeds for a path the normal, unforced rules would
+    /// refuse: below the size floor, a git-repository root, and each of the five denylist
+    /// entries.
+    #[test]
+    fn forced_selection_accepts_paths_the_unforced_rules_refuse() {
+        let root = tempdir().unwrap();
+        let home = root.path().to_path_buf();
+        let big = ANALYZE_MINIMUM_SIZE;
+
+        // Below the size floor.
+        let small = home.join("Downloads/note.txt");
+        fs::create_dir_all(small.parent().unwrap()).unwrap();
+        fs::write(&small, b"x").unwrap();
+        assert!(!selectable(&home, &small, false, big - 1));
+        assert!(selectable_forced(&home, &small, false, big - 1));
+
+        // A git-repository root.
+        let project = home.join("code/project");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::write(project.join("README.md"), vec![0u8; 8]).unwrap();
+        assert!(!selectable(&home, &project, true, big));
+        assert!(selectable_forced(&home, &project, true, big));
+
+        // Each denylist entry.
+        for relative in [".ssh", ".gnupg", ".config", ".git", "go/pkg"] {
+            let dir = home.join(relative);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("data.bin"), vec![0u8; 8]).unwrap();
+            assert!(
+                !selectable(&home, &dir, true, big),
+                "expected unforced selection to still refuse {relative}"
+            );
+            assert!(
+                selectable_forced(&home, &dir, true, big),
+                "expected forced selection to accept {relative}"
+            );
+        }
+    }
+
+    /// Forced validation in the executor accepts the same paths forced selection in the TUI
+    /// offers: a git-repository root and each denylist entry (the size floor is a TUI-only
+    /// concept; the executor has no size check to relax).
+    #[test]
+    fn forced_selection_agrees_with_forced_executor_validation() {
+        let root = tempdir().unwrap();
+        let home = root.path().to_path_buf();
+        let executor = Executor::new(home.clone());
+        let big = ANALYZE_MINIMUM_SIZE;
+
+        let project = home.join("code/project");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::write(project.join("README.md"), vec![0u8; 8]).unwrap();
+        assert!(selectable_forced(&home, &project, true, big));
+        assert!(executor.validate_personal_file_forced(&project).is_ok());
+
+        for relative in [".ssh", ".gnupg", ".config", ".git", "go/pkg"] {
+            let dir = home.join(relative);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("data.bin"), vec![0u8; 8]).unwrap();
+            assert!(selectable_forced(&home, &dir, true, big));
+            assert!(
+                executor.validate_personal_file_forced(&dir).is_ok(),
+                "forced executor validation disagreed with forced selectability for {relative}"
+            );
+        }
+    }
+
+    /// Force must never override a path being outside home, even at the TUI's pre-selection
+    /// layer. The remaining hard checks (home itself, `..`, symlink, symlinked ancestor) apply to
+    /// paths that can only ever reach `Executor::validate_personal_file_forced` -- see
+    /// `forced_validation_still_refuses_every_hard_check` in `src/executor.rs`, which covers each
+    /// of those individually.
+    #[test]
+    fn forced_selection_still_refuses_a_path_outside_home() {
+        let home = Path::new("/home/tester");
+        assert_eq!(
+            personal_file_selectability_forced(
+                home,
+                Path::new("/somewhere/else/archive.iso"),
+                false,
+                ANALYZE_MINIMUM_SIZE
+            ),
+            Err(PersonalFileRefusal::OutsideHome)
+        );
+    }
+
     /// A large directory under home is selectable and accepted by `validate_personal_file`, and
     /// removing it through the executor actually deletes it and everything inside it.
     #[test]
@@ -1769,7 +2050,10 @@ mod tests {
             label: "recordings".into(),
             estimated_bytes: 16,
             risk: Risk::Explicit,
-            action: CleanupAction::RemovePersonalFile { path: dir.clone() },
+            action: CleanupAction::RemovePersonalFile {
+                path: dir.clone(),
+                force: false,
+            },
         };
         let result = executor.execute(&item, false);
         assert!(result.success, "{}", result.message);
@@ -1808,7 +2092,10 @@ mod tests {
             label: "linked-large-dir".into(),
             estimated_bytes: ANALYZE_MINIMUM_SIZE,
             risk: Risk::Explicit,
-            action: CleanupAction::RemovePersonalFile { path: link.clone() },
+            action: CleanupAction::RemovePersonalFile {
+                path: link.clone(),
+                force: false,
+            },
         };
         let result = executor.execute(&item, false);
         assert!(!result.success);
@@ -2052,6 +2339,7 @@ mod tests {
         };
         let personal = CleanupAction::RemovePersonalFile {
             path: PathBuf::from("/home/tester/Downloads/file.iso"),
+            force: false,
         };
 
         assert!(cleanup_action_requires_root(&direct));
@@ -2149,6 +2437,7 @@ mod tests {
             confirming_delete: false,
             results: None,
             status: "Ready".into(),
+            status_severity: StatusSeverity::Info,
             filter: String::new(),
             filtering: false,
             show_help: false,
@@ -2182,5 +2471,199 @@ mod tests {
         // larger file arrived, not whatever now sits at the stale index.
         let (path, _size) = state.focused_file().expect("b.bin is selectable");
         assert_eq!(path, PathBuf::from("/root/b.bin"));
+    }
+
+    fn below_floor_file(root: &Path) -> PathBuf {
+        let file = root.join("Downloads/small.bin");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, vec![0u8; 10]).unwrap();
+        file
+    }
+
+    #[test]
+    fn plain_d_still_refuses_a_row_the_size_floor_refuses() {
+        // Unforced behavior is unchanged: normal `d` must keep refusing exactly what it refused
+        // before this change.
+        let root = tempdir().unwrap();
+        let file = below_floor_file(root.path());
+        let mut app = App::new(root.path().to_path_buf());
+        app.screen = Screen::Analyze(Box::new(ready_analyze(root.path(), file.clone())));
+
+        app.handle_key(key(KeyCode::Char('d')));
+
+        let Screen::Analyze(analyze) = &app.screen else {
+            panic!("expected Analyze screen");
+        };
+        assert!(!analyze.confirming_delete);
+        assert!(file.exists());
+    }
+
+    #[test]
+    fn shift_d_force_deletes_a_row_the_size_floor_refuses() {
+        let root = tempdir().unwrap();
+        let file = below_floor_file(root.path());
+        let mut app = App::new(root.path().to_path_buf());
+        app.screen = Screen::Analyze(Box::new(ready_analyze(root.path(), file.clone())));
+
+        app.handle_key(key(KeyCode::Char('D')));
+        {
+            let Screen::Analyze(analyze) = &app.screen else {
+                panic!("expected Analyze screen");
+            };
+            assert!(analyze.confirming_delete);
+            assert!(!analyze.pending_delete.is_empty());
+            assert!(analyze.pending_delete.values().all(|entry| entry.force));
+        }
+        assert!(
+            file.exists(),
+            "the confirmation dialog must still gate removal"
+        );
+
+        app.handle_key(key(KeyCode::Enter));
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn plain_space_selects_normally_without_a_modifier() {
+        let root = tempdir().unwrap();
+        let file = root.path().join("Downloads/large.bin");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::File::create(&file)
+            .unwrap()
+            .set_len(ANALYZE_MINIMUM_SIZE)
+            .unwrap();
+        let mut app = App::new(root.path().to_path_buf());
+        app.screen = Screen::Analyze(Box::new(ready_analyze(root.path(), file)));
+
+        app.handle_key(key(KeyCode::Char(' ')));
+
+        let Screen::Analyze(analyze) = &app.screen else {
+            panic!("expected Analyze screen");
+        };
+        assert_eq!(analyze.selected_files.len(), 1);
+        assert!(analyze.selected_files.values().all(|entry| !entry.force));
+    }
+
+    #[test]
+    fn space_with_shift_modifier_force_selects_a_row_the_normal_rules_refuse() {
+        let root = tempdir().unwrap();
+        let file = below_floor_file(root.path());
+        let mut app = App::new(root.path().to_path_buf());
+        app.screen = Screen::Analyze(Box::new(ready_analyze(root.path(), file)));
+
+        // Plain Space (no modifier) must still refuse it.
+        app.handle_key(key(KeyCode::Char(' ')));
+        {
+            let Screen::Analyze(analyze) = &app.screen else {
+                panic!("expected Analyze screen");
+            };
+            assert!(analyze.selected_files.is_empty());
+        }
+
+        // Space with the SHIFT modifier force-selects it.
+        app.handle_key(shift_key(KeyCode::Char(' ')));
+        let Screen::Analyze(analyze) = &app.screen else {
+            panic!("expected Analyze screen");
+        };
+        assert_eq!(analyze.selected_files.len(), 1);
+        assert!(analyze.selected_files.values().all(|entry| entry.force));
+    }
+
+    #[test]
+    fn s_is_a_portable_alias_for_force_select() {
+        // `S` must always work, unconditionally, regardless of what a terminal reports for
+        // Shift+Space -- this is the fallback for terminals that cannot disambiguate the two.
+        let root = tempdir().unwrap();
+        let file = below_floor_file(root.path());
+        let mut app = App::new(root.path().to_path_buf());
+        app.screen = Screen::Analyze(Box::new(ready_analyze(root.path(), file)));
+
+        app.handle_key(key(KeyCode::Char('S')));
+
+        let Screen::Analyze(analyze) = &app.screen else {
+            panic!("expected Analyze screen");
+        };
+        assert_eq!(analyze.selected_files.len(), 1);
+        assert!(analyze.selected_files.values().all(|entry| entry.force));
+    }
+
+    #[test]
+    fn toggle_selection_refusal_sets_warning_severity() {
+        let root = tempdir().unwrap();
+        let file = below_floor_file(root.path());
+        let mut app = App::new(root.path().to_path_buf());
+        app.screen = Screen::Analyze(Box::new(ready_analyze(root.path(), file)));
+
+        app.handle_key(key(KeyCode::Char(' ')));
+
+        let Screen::Analyze(analyze) = &app.screen else {
+            panic!("expected Analyze screen");
+        };
+        assert_eq!(analyze.status_severity, StatusSeverity::Warning);
+    }
+
+    #[test]
+    fn confirm_delete_execution_failure_sets_error_severity() {
+        let root = tempdir().unwrap();
+        let file = root.path().join("Downloads/large.bin");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::File::create(&file)
+            .unwrap()
+            .set_len(ANALYZE_MINIMUM_SIZE)
+            .unwrap();
+        let mut state = ready_analyze(root.path(), file);
+
+        // Point `pending_delete` directly at a denylisted, unforced path, bypassing selection, so
+        // the executor refuses it and reports a genuine failure.
+        let protected = root.path().join(".config/state.bin");
+        fs::create_dir_all(protected.parent().unwrap()).unwrap();
+        fs::write(&protected, vec![0u8; 8]).unwrap();
+        state.pending_delete.insert(
+            protected,
+            PendingRemoval {
+                size: 8,
+                is_dir: false,
+                force: false,
+            },
+        );
+
+        state.confirm_delete();
+
+        assert_eq!(state.status_severity, StatusSeverity::Error);
+        assert!(
+            state
+                .results
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|result| !result.success)
+        );
+    }
+
+    #[test]
+    fn forced_confirmation_dialog_names_the_overridden_guard() {
+        let root = tempdir().unwrap();
+        let file = below_floor_file(root.path());
+        let mut state = ready_analyze(root.path(), file.clone());
+        state.pending_delete.insert(
+            file,
+            PendingRemoval {
+                size: 10,
+                is_dir: false,
+                force: true,
+            },
+        );
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_delete_confirmation(frame, &state))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(rendered.contains("FORCE removal"));
+        assert!(rendered.contains("overriding:"));
+        assert!(rendered.contains(&format!("below {}", format_bytes(ANALYZE_MINIMUM_SIZE))));
     }
 }
